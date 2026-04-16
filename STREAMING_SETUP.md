@@ -41,9 +41,11 @@ pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 | **On-Start Script** | *(see below)* |
 | **Disk Space** | 30 GB minimum |
 
+> Note: vast.ai uses port `8080` for Jupyter by default — noVNC runs on `6080` to avoid conflict.
+
 ### Open Ports
 In **Edit Instance → Expose Ports**, add:
-- `8080` — noVNC browser GUI
+- `6080` — noVNC browser GUI
 - `8554` — RTSP webcam stream input
 
 ### On-Start Script
@@ -132,7 +134,7 @@ Keep this terminal open — it must stay running while you use Deep-Live-Cam.
 
 1. Open your browser and go to:
    ```
-   http://<instance-ip>:8080/vnc.html
+   http://<instance-ip>:6080/vnc.html
    ```
 2. Click **Connect**
 3. The Deep-Live-Cam GUI will appear

@@ -6,7 +6,7 @@ set -e
 # GUI in browser: http://<instance-ip>:8080/vnc.html
 # ──────────────────────────────────────────────────────────────────────────────
 
-NOVNC_PORT=8080
+NOVNC_PORT=6080
 RTSP_PORT=8554        # port your local machine pushes webcam stream to
 VIRTUAL_CAM=/dev/video10  # virtual webcam device Deep-Live-Cam will open
 
