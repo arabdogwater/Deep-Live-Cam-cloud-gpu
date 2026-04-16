@@ -82,7 +82,8 @@ cd "$APP_DIR"
 step "Setting up Python venv"
 if [ ! -d "$VENV_DIR" ]; then
     info "Creating venv at $VENV_DIR ..."
-    python3 -m venv "$VENV_DIR"
+    # --system-site-packages lets the venv see Docker's pre-installed torch/CUDA
+    python3 -m venv --system-site-packages "$VENV_DIR"
     ok "venv created"
 else
     ok "venv already exists — skipping"
@@ -144,13 +145,24 @@ elapsed
 # ── 6. Virtual webcam + RTSP server (for live streaming from local machine) ────
 step "Setting up virtual webcam (v4l2loopback + MediaMTX)"
 
-# Load v4l2loopback kernel module to create a virtual webcam device
+# Build v4l2loopback via DKMS if module isn't loadable yet
+if ! modinfo v4l2loopback &>/dev/null; then
+    info "Building v4l2loopback kernel module via DKMS..."
+    dkms autoinstall 2>&1 | tail -5 || true
+fi
+
+# Load the module
 if ! lsmod | grep -q v4l2loopback; then
     info "Loading v4l2loopback kernel module..."
-    modprobe v4l2loopback devices=1 video_nr=10 card_label="VirtualCam" exclusive_caps=1 || \
-        { echo "  ✘  v4l2loopback failed — ensure instance is set to 'Privileged' in vast.ai"; }
+    if ! modprobe v4l2loopback devices=1 video_nr=10 card_label="VirtualCam" exclusive_caps=1 2>/dev/null; then
+        echo "  ✘  v4l2loopback could not load — webcam streaming will not work"
+        echo "     Fix: enable 'Privileged' on the vast.ai instance and restart"
+    else
+        ok "Virtual webcam at $VIRTUAL_CAM"
+    fi
+else
+    ok "Virtual webcam at $VIRTUAL_CAM (already loaded)"
 fi
-ok "Virtual webcam at $VIRTUAL_CAM"
 
 # Install MediaMTX (lightweight RTSP server) if not already present
 MEDIAMTX_BIN="/usr/local/bin/mediamtx"
@@ -201,10 +213,13 @@ sleep 1
 ok "x11vnc running"
 
 info "Starting noVNC on port $NOVNC_PORT ..."
+# Kill anything already using this port (e.g. a previous run)
+fuser -k ${NOVNC_PORT}/tcp 2>/dev/null || true
+sleep 1
 NOVNC_PATH=$(find /usr/share -name "vnc.html" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "/usr/share/novnc")
 websockify --web="$NOVNC_PATH" $NOVNC_PORT localhost:5900 &
 sleep 1
-ok "noVNC running"
+ok "noVNC running on port $NOVNC_PORT"
 elapsed
 
 # ── 8. Launch Deep-Live-Cam ───────────────────────────────────────────────────
