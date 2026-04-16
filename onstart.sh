@@ -4,7 +4,7 @@ set -e
 # ─── Deep-Live-Cam – vast.ai onstart script ───────────────────────────────────
 # Designed for: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 # GUI in browser: open the port you set as OPEN_BUTTON_PORT (default 8080)
-# Ports to open in your vast.ai template: 8080 (noVNC), 8554 (RTSP)
+# Ports to open in your vast.ai template: 8080 (Web UI), 8554 (RTSP)
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ── Port config (driven by vast.ai env vars) ─────────────────────────────────
@@ -13,10 +13,10 @@ set -e
 #   VAST_TCP_PORT_XXXX  — external (host-side) port mapped to internal port XXXX
 #   PUBLIC_IPADDR       — public IP of the instance
 #
-# In your vast.ai template, add open ports: 8080 (noVNC) and 8554 (RTSP).
+# In your vast.ai template, add open ports: 8080 (Web UI) and 8554 (RTSP).
 # Set OPEN_BUTTON_PORT=8080 as the primary port in the template.
 # Override RTSP_PORT here only if you open a different port in the template.
-NOVNC_PORT=${OPEN_BUTTON_PORT:-8080}   # internal port noVNC binds on
+WEBUI_PORT=${OPEN_BUTTON_PORT:-8080}   # internal port the FastAPI web UI binds on
 RTSP_PORT=${RTSP_PORT:-8554}           # internal port MediaMTX RTSP listens on
 INSTANCE_IP=${PUBLIC_IPADDR:-$(hostname -I | awk '{print $1}')}
 VIRTUAL_CAM=/dev/video10  # virtual webcam device Deep-Live-Cam will open
@@ -53,21 +53,16 @@ echo "  Started at $(date)"
 step "Installing system packages"
 info "Running apt-get update..."
 apt-get update -qq
-info "Installing ffmpeg, tkinter, xvfb, x11vnc, noVNC, v4l2loopback..."
+info "Installing ffmpeg, v4l2loopback, and build deps..."
 apt-get install -y --no-install-recommends \
     git \
     ffmpeg \
-    python3-tk \
     libglib2.0-0 \
     libsm6 \
     libxrender1 \
     libxext6 \
     libgl1 \
     wget \
-    xvfb \
-    x11vnc \
-    novnc \
-    websockify \
     v4l2loopback-dkms \
     v4l2loopback-utils \
     linux-headers-$(uname -r) 2>&1 | grep -E "^(Get|Unpacking|Setting up|Processing)" | sed 's/^/  | /' || true
@@ -122,6 +117,10 @@ fi
 
 info "Installing project requirements..."
 pip install -r requirements.txt 2>&1 \
+    | grep -E "^(Collecting|Downloading|Installing|Successfully)" | sed 's/^/  | /' || true
+
+info "Installing web UI dependencies (FastAPI, Uvicorn)..."
+pip install fastapi "uvicorn[standard]" 2>&1 \
     | grep -E "^(Collecting|Downloading|Installing|Successfully)" | sed 's/^/  | /' || true
 ok "All Python dependencies installed"
 elapsed
@@ -211,35 +210,17 @@ info "Starting ffmpeg bridge (RTSP → $VIRTUAL_CAM)..."
 ok "Webcam bridge ready — push your stream to rtsp://<instance-ip>:$RTSP_PORT/webcam"
 elapsed
 
-# ── 7. Launch virtual display + noVNC ─────────────────────────────────────────
-step "Starting virtual display and noVNC"
-
-export DISPLAY=:99
-info "Starting Xvfb on $DISPLAY ..."
-Xvfb :99 -screen 0 1920x1080x24 &
-sleep 1
-ok "Xvfb running"
-
-info "Starting x11vnc (VNC server)..."
-x11vnc -display :99 -nopw -listen localhost -forever -quiet &
-sleep 1
-ok "x11vnc running"
-
-info "Starting noVNC on port $NOVNC_PORT ..."
-# Kill anything already using this port (e.g. a previous run)
-fuser -k ${NOVNC_PORT}/tcp 2>/dev/null || true
-sleep 1
-NOVNC_PATH=$(find /usr/share -name "vnc.html" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "/usr/share/novnc")
-websockify --web="$NOVNC_PATH" $NOVNC_PORT localhost:5900 &
-sleep 1
-ok "noVNC running on port $NOVNC_PORT"
+# ── 7. Kill anything already on the web UI port ───────────────────────────────
+step "Clearing web UI port"
+fuser -k ${WEBUI_PORT}/tcp 2>/dev/null || true
+ok "Port $WEBUI_PORT is free"
 elapsed
 
-# ── 8. Launch Deep-Live-Cam ───────────────────────────────────────────────────
-step "Launching Deep-Live-Cam"
+# ── 8. Launch Deep-Live-Cam web UI ────────────────────────────────────────────
+step "Launching Deep-Live-Cam (FastAPI Web UI)"
 
 # Resolve external ports: vast.ai sets VAST_TCP_PORT_XXXX = external port for internal port XXXX
-_novnc_ext=$(eval "echo \${VAST_TCP_PORT_${NOVNC_PORT}:-${NOVNC_PORT}}")
+_webui_ext=$(eval "echo \${VAST_TCP_PORT_${WEBUI_PORT}:-${WEBUI_PORT}}")
 _rtsp_ext=$(eval "echo \${VAST_TCP_PORT_${RTSP_PORT}:-${RTSP_PORT}}")
 
 TOTAL=$(($(date +%s) - START_TIME))
@@ -247,12 +228,12 @@ echo ""
 echo "╔═══════════════════════════════════════════════════╗"
 echo "║  Setup complete in ${TOTAL}s"
 echo "║"
-echo "║  GUI (browser):  http://${INSTANCE_IP}:${_novnc_ext}/vnc.html"
+echo "║  Web UI:         http://${INSTANCE_IP}:${_webui_ext}/"
 echo "║  Push webcam to: rtsp://${INSTANCE_IP}:${_rtsp_ext}/webcam"
 echo "║"
-echo "║  noVNC internal:${NOVNC_PORT}  external:${_novnc_ext}"
+echo "║  WebUI internal:${WEBUI_PORT}  external:${_webui_ext}"
 echo "║  RTSP  internal:${RTSP_PORT}  external:${_rtsp_ext}"
 echo "╚═══════════════════════════════════════════════════╝"
 echo ""
 
-exec python run.py --execution-provider cuda
+exec python webui.py --execution-provider cuda

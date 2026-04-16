@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deep Live Cam</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: { sans: ['Fira Sans', 'sans-serif'], mono: ['Fira Code', 'monospace'] },
+        colors: {
+          base: '#020617', card: '#0f172a', border: '#1e293b',
+          border2: '#334155', muted: '#64748b', sub: '#94a3b8',
+          cta: '#22c55e', ctah: '#16a34a', danger: '#ef4444',
+          info: '#3b82f6', warn: '#f59e0b',
+        }
+      }
+    }
+  }
+</script>
+<style>
+  * { box-sizing: border-box; }
+  body { background: #020617; color: #f8fafc; font-family: 'Fira Sans', sans-serif; }
+  ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #0f172a; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+
+  /* Toggle switch */
+  .tog { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+  .tog input { display: none; }
+  .tog-track { width: 40px; height: 22px; background: #334155; border-radius: 11px; position: relative; transition: background .2s; flex-shrink: 0; }
+  .tog-track::after { content:''; position:absolute; width:16px; height:16px; top:3px; left:3px; background:#fff; border-radius:50%; transition:transform .2s; }
+  .tog input:checked + .tog-track { background: #22c55e; }
+  .tog input:checked + .tog-track::after { transform: translateX(18px); }
+
+  /* Custom range slider */
+  input[type=range] { -webkit-appearance:none; appearance:none; width:100%; height:4px; background:#334155; border-radius:2px; outline:none; cursor:pointer; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:16px; height:16px; background:#3b82f6; border-radius:50%; cursor:pointer; transition:background .15s; }
+  input[type=range]::-webkit-slider-thumb:hover { background:#60a5fa; }
+
+  /* Upload drop zone */
+  .drop-zone { border: 1.5px dashed #334155; border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center; cursor:pointer; transition:border-color .2s, background .2s; min-height:140px; position:relative; overflow:hidden; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color:#3b82f6; background:rgba(59,130,246,.06); }
+  .drop-zone input[type=file] { position:absolute; inset:0; opacity:0; cursor:pointer; }
+  .drop-zone img { width:100%; height:100%; object-fit:cover; border-radius:8px; display:none; position:absolute; inset:0; }
+  .drop-zone .placeholder { display:flex; flex-direction:column; align-items:center; gap:6px; z-index:1; pointer-events:none; }
+  .drop-zone.has-image img { display:block; }
+  .drop-zone.has-image .placeholder { display:none; }
+
+  /* Progress bar */
+  .prog-track { height:4px; background:#1e293b; border-radius:2px; overflow:hidden; }
+  .prog-fill  { height:100%; background:linear-gradient(90deg,#22c55e,#3b82f6); border-radius:2px; width:0%; transition:width .4s ease; }
+
+  /* Buttons */
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:7px; font-family:'Fira Sans',sans-serif; font-weight:500; font-size:13px; padding:8px 16px; border-radius:8px; border:none; cursor:pointer; transition:background .15s, opacity .15s, transform .1s; letter-spacing:.3px; }
+  .btn:active:not(:disabled) { transform:scale(.97); }
+  .btn:disabled { opacity:.4; cursor:not-allowed; }
+  .btn-green  { background:#22c55e; color:#000; }
+  .btn-green:hover:not(:disabled)  { background:#16a34a; }
+  .btn-blue   { background:#3b82f6; color:#fff; }
+  .btn-blue:hover:not(:disabled)   { background:#2563eb; }
+  .btn-red    { background:#ef4444; color:#fff; }
+  .btn-red:hover:not(:disabled)    { background:#dc2626; }
+  .btn-ghost  { background:#1e293b; color:#94a3b8; border:1px solid #334155; }
+  .btn-ghost:hover:not(:disabled)  { background:#334155; color:#f8fafc; }
+  .btn-dl     { background:#0f172a; color:#22c55e; border:1px solid #22c55e; }
+  .btn-dl:hover:not(:disabled)     { background:#22c55e; color:#000; }
+
+  /* Select */
+  select { background:#1e293b; color:#f8fafc; border:1px solid #334155; border-radius:8px; padding:6px 28px 6px 10px; font-family:'Fira Sans',sans-serif; font-size:13px; cursor:pointer; outline:none; appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat:no-repeat; background-position:right 10px center; }
+  select:focus { border-color:#3b82f6; }
+
+  /* Card */
+  .card { background:#0f172a; border:1px solid #1e293b; border-radius:12px; padding:16px; }
+
+  /* Pulse dot */
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  .pulse { animation:pulse 1.5s infinite; }
+
+  /* Preview area */
+  #preview-area { background:#0a0f1c; border-radius:12px; border:1px solid #1e293b; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  #preview-area img { width:100%; height:100%; object-fit:contain; display:none; }
+  #preview-placeholder { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; color:#334155; }
+
+  /* Upload progress overlay */
+  .upload-prog { position:absolute; bottom:0; left:0; right:0; height:3px; background:#1e293b; }
+  .upload-prog-fill { height:100%; background:#3b82f6; width:0%; transition:width .2s; }
+</style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+<!-- ── Header ────────────────────────────────────────────────────────────── -->
+<header class="flex items-center justify-between px-5 py-3 border-b border-border bg-card sticky top-0 z-50">
+  <div class="flex items-center gap-3">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2m-3.5-7.5-1.4 1.4M6.9 17.1l-1.4 1.4m12.1 0-1.4-1.4M6.9 6.9 5.5 5.5"/></svg>
+    <span class="font-semibold text-base tracking-wide">Deep Live Cam</span>
+    <span id="version-badge" class="text-xs text-muted font-mono bg-border px-2 py-0.5 rounded-full"></span>
+  </div>
+  <div class="flex items-center gap-3">
+    <span id="status-dot" class="w-2 h-2 rounded-full bg-sub"></span>
+    <span id="status-text" class="text-sm text-sub font-mono truncate max-w-xs">Initializing…</span>
+  </div>
+</header>
+
+<!-- ── Body layout ────────────────────────────────────────────────────────── -->
+<div class="flex flex-1 overflow-hidden" style="height:calc(100vh - 53px)">
+
+  <!-- LEFT SIDEBAR -->
+  <aside class="w-80 flex-shrink-0 overflow-y-auto border-r border-border p-4 flex flex-col gap-4">
+
+    <!-- Source Face -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-xs font-semibold uppercase tracking-widest text-muted">Source Face</span>
+        <button id="btn-random" class="btn btn-ghost" style="padding:4px 10px;font-size:11px;" title="Get random face from thispersondoesnotexist.com">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
+          Random
+        </button>
+      </div>
+      <div class="drop-zone" id="source-zone" title="Click or drag an image">
+        <input type="file" accept="image/*" id="source-input">
+        <img id="source-img" alt="source">
+        <div class="upload-prog"><div class="upload-prog-fill" id="source-prog"></div></div>
+        <div class="placeholder">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#334155" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="10" r="3"/><path d="M7 20.662V19a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v1.662"/></svg>
+          <span class="text-xs text-muted">Drop face image or click</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Target -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-xs font-semibold uppercase tracking-widest text-muted">Target</span>
+        <span id="target-type-badge" class="text-xs font-mono text-muted hidden px-2 py-0.5 bg-border rounded-full"></span>
+      </div>
+      <div class="drop-zone" id="target-zone" title="Click or drag an image/video">
+        <input type="file" accept="image/*,video/*" id="target-input">
+        <img id="target-img" alt="target">
+        <div class="upload-prog"><div class="upload-prog-fill" id="target-prog"></div></div>
+        <div class="placeholder">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#334155" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="m10 15 5-3-5-3v6z"/></svg>
+          <span class="text-xs text-muted">Drop image or video</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="card">
+      <div class="flex items-center justify-between mb-4">
+        <span class="text-xs font-semibold uppercase tracking-widest text-muted">Settings</span>
+      </div>
+
+      <div class="flex flex-col gap-3">
+        <!-- Toggles left/right columns -->
+        <div class="grid grid-cols-2 gap-x-4 gap-y-3">
+          <label class="tog"><input type="checkbox" id="tog-keep-fps" checked><span class="tog-track"></span><span class="text-xs text-sub">Keep FPS</span></label>
+          <label class="tog"><input type="checkbox" id="tog-keep-audio" checked><span class="tog-track"></span><span class="text-xs text-sub">Keep Audio</span></label>
+          <label class="tog"><input type="checkbox" id="tog-many-faces"><span class="tog-track"></span><span class="text-xs text-sub">Many Faces</span></label>
+          <label class="tog"><input type="checkbox" id="tog-mirror"><span class="tog-track"></span><span class="text-xs text-sub">Mirror</span></label>
+          <label class="tog"><input type="checkbox" id="tog-poisson"><span class="tog-track"></span><span class="text-xs text-sub">Poisson Blend</span></label>
+          <label class="tog"><input type="checkbox" id="tog-color-fix"><span class="tog-track"></span><span class="text-xs text-sub">Fix Color</span></label>
+          <label class="tog"><input type="checkbox" id="tog-show-fps"><span class="tog-track"></span><span class="text-xs text-sub">Show FPS</span></label>
+          <label class="tog"><input type="checkbox" id="tog-keep-frames"><span class="tog-track"></span><span class="text-xs text-sub">Keep Frames</span></label>
+        </div>
+
+        <div class="border-t border-border my-1"></div>
+
+        <!-- Enhancer -->
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-xs text-sub whitespace-nowrap">Enhancer</span>
+          <select id="sel-enhancer" class="flex-1">
+            <option value="none">None</option>
+            <option value="face_enhancer">GFPGAN</option>
+            <option value="face_enhancer_gpen512">GPEN-512</option>
+            <option value="face_enhancer_gpen256">GPEN-256</option>
+          </select>
+        </div>
+
+        <!-- Sliders -->
+        <div class="flex flex-col gap-3 mt-1">
+          <div>
+            <div class="flex justify-between mb-1.5">
+              <span class="text-xs text-sub">Opacity</span>
+              <span id="lbl-opacity" class="text-xs font-mono text-info">100%</span>
+            </div>
+            <input type="range" id="sl-opacity" min="0" max="100" value="100">
+          </div>
+          <div>
+            <div class="flex justify-between mb-1.5">
+              <span class="text-xs text-sub">Sharpness</span>
+              <span id="lbl-sharp" class="text-xs font-mono text-info">0.0</span>
+            </div>
+            <input type="range" id="sl-sharp" min="0" max="50" value="0">
+          </div>
+          <div>
+            <div class="flex justify-between mb-1.5">
+              <span class="text-xs text-sub">Mouth Mask</span>
+              <span id="lbl-mouth" class="text-xs font-mono text-info">Off</span>
+            </div>
+            <input type="range" id="sl-mouth" min="0" max="100" value="0">
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- MAIN PANEL -->
+  <main class="flex-1 flex flex-col overflow-hidden p-4 gap-4">
+
+    <!-- Camera row -->
+    <div class="flex items-center gap-3">
+      <span class="text-xs font-semibold uppercase tracking-widest text-muted whitespace-nowrap">Live Camera</span>
+      <select id="sel-camera" class="min-w-32">
+        <option value="10">Camera 10 (v4l2)</option>
+      </select>
+      <button id="btn-refresh-cams" class="btn btn-ghost" style="padding:5px 10px;" title="Refresh camera list">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
+      </button>
+      <div class="flex-1"></div>
+      <span id="live-badge" class="hidden items-center gap-1.5 text-xs font-semibold text-cta font-mono">
+        <span class="w-2 h-2 rounded-full bg-cta pulse"></span>LIVE
+      </span>
+    </div>
+
+    <!-- Preview area -->
+    <div id="preview-area" class="flex-1 relative" style="min-height:0;">
+      <img id="img-live"   alt="Live stream">
+      <img id="img-output" alt="Output preview">
+      <div id="preview-placeholder">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#1e293b" stroke-width="1"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="m10 15 5-3-5-3v6z"/></svg>
+        <span class="text-xs" style="color:#1e293b">Preview will appear here</span>
+      </div>
+    </div>
+
+    <!-- Action buttons -->
+    <div class="flex items-center gap-3 flex-wrap">
+      <button id="btn-live"  class="btn btn-green" style="min-width:90px;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="m10 15 5-3-5-3v6z"/></svg>
+        Live
+      </button>
+      <button id="btn-start" class="btn btn-blue" style="min-width:90px;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Start
+      </button>
+      <button id="btn-stop"  class="btn btn-red" style="min-width:90px;" disabled>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+        Stop
+      </button>
+      <div class="flex-1"></div>
+      <button id="btn-dl" class="btn btn-dl hidden" style="min-width:120px;">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download
+      </button>
+    </div>
+
+    <!-- Progress -->
+    <div>
+      <div class="flex items-center justify-between mb-1.5">
+        <span id="status-detail" class="text-xs text-sub font-mono truncate flex-1">Ready</span>
+        <span id="pct-label" class="text-xs font-mono text-muted ml-2">0%</span>
+      </div>
+      <div class="prog-track">
+        <div id="prog-fill" class="prog-fill"></div>
+      </div>
+    </div>
+
+  </main>
+
+</div>
+
+<script>
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const api = async (method, path, body) => {
+  const opts = { method, headers: {} };
+  if (body && !(body instanceof FormData)) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  } else if (body) {
+    opts.body = body;
+  }
+  const r = await fetch(path, opts);
+  if (!r.ok) { const t = await r.text(); throw new Error(t || r.status); }
+  return r.json();
+};
+
+// ── Settings sync ─────────────────────────────────────────────────────────────
+const TOGGLES = {
+  'tog-keep-fps':    'keep_fps',
+  'tog-keep-audio':  'keep_audio',
+  'tog-many-faces':  'many_faces',
+  'tog-mirror':      'live_mirror',
+  'tog-poisson':     'poisson_blend',
+  'tog-color-fix':   'color_correction',
+  'tog-show-fps':    'show_fps',
+  'tog-keep-frames': 'keep_frames',
+};
+
+function debounce(fn, ms) {
+  let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+const pushSettings = debounce(async () => {
+  const s = {};
+  for (const [id, key] of Object.entries(TOGGLES))
+    s[key] = $(id).checked;
+  s.opacity         = parseFloat($('sl-opacity').value) / 100;
+  s.sharpness       = parseFloat($('sl-sharp').value)   / 10;
+  s.mouth_mask_size = parseFloat($('sl-mouth').value);
+  // enhancer
+  const enh = $('sel-enhancer').value;
+  s.face_enhancer        = enh === 'face_enhancer';
+  s.face_enhancer_gpen512 = enh === 'face_enhancer_gpen512';
+  s.face_enhancer_gpen256 = enh === 'face_enhancer_gpen256';
+  try { await api('POST', '/api/settings', s); }
+  catch(e) { console.warn('settings sync failed', e); }
+}, 300);
+
+async function loadSettings() {
+  try {
+    const s = await api('GET', '/api/settings');
+    for (const [id, key] of Object.entries(TOGGLES))
+      $(id).checked = !!s[key];
+    $('sl-opacity').value = Math.round(s.opacity * 100);
+    $('sl-sharp').value   = Math.round(s.sharpness * 10);
+    $('sl-mouth').value   = s.mouth_mask_size || 0;
+    updateSliderLabels();
+    if (s.face_enhancer)         $('sel-enhancer').value = 'face_enhancer';
+    else if (s.face_enhancer_gpen512) $('sel-enhancer').value = 'face_enhancer_gpen512';
+    else if (s.face_enhancer_gpen256) $('sel-enhancer').value = 'face_enhancer_gpen256';
+    else $('sel-enhancer').value = 'none';
+  } catch(e) { console.warn('load settings failed', e); }
+}
+
+function updateSliderLabels() {
+  const op = parseInt($('sl-opacity').value);
+  $('lbl-opacity').textContent = op + '%';
+  const sh = (parseInt($('sl-sharp').value) / 10).toFixed(1);
+  $('lbl-sharp').textContent = sh;
+  const mm = parseInt($('sl-mouth').value);
+  $('lbl-mouth').textContent = mm === 0 ? 'Off' : mm + '%';
+}
+
+for (const id of Object.keys(TOGGLES))
+  $(id).addEventListener('change', pushSettings);
+$('sel-enhancer').addEventListener('change', pushSettings);
+for (const id of ['sl-opacity','sl-sharp','sl-mouth']) {
+  $(id).addEventListener('input', () => { updateSliderLabels(); pushSettings(); });
+}
+
+// ── Camera list ───────────────────────────────────────────────────────────────
+async function loadCameras() {
+  try {
+    const { cameras } = await api('GET', '/api/cameras');
+    const sel = $('sel-camera');
+    const prev = sel.value;
+    sel.innerHTML = '';
+    if (!cameras.length) {
+      sel.innerHTML = '<option value="10">Camera 10 (v4l2 default)</option>';
+      return;
+    }
+    for (const c of cameras) {
+      const o = document.createElement('option');
+      o.value = c.index; o.textContent = c.name;
+      if (String(c.index) === prev) o.selected = true;
+      sel.appendChild(o);
+    }
+    // prefer camera 10 if present (v4l2loopback)
+    const v4l = [...sel.options].find(o => o.value === '10');
+    if (v4l) v4l.selected = true;
+  } catch(e) { console.warn('camera list failed', e); }
+}
+$('btn-refresh-cams').addEventListener('click', loadCameras);
+
+// ── Upload helpers ────────────────────────────────────────────────────────────
+function makeDropZone(zoneId, inputId, imgId, progId, endpoint, onSuccess) {
+  const zone  = $(zoneId);
+  const input = $(inputId);
+  const img   = $(imgId);
+  const prog  = $(progId);
+
+  async function upload(file) {
+    if (!file) return;
+    zone.classList.remove('has-image');
+    const fd = new FormData();
+    fd.append('file', file);
+    await new Promise((res, rej) => {
+      const xhr = new XMLHttpRequest();
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) prog.style.width = (e.loaded/e.total*100) + '%';
+      };
+      xhr.onload = () => {
+        prog.style.width = '0%';
+        if (xhr.status >= 200 && xhr.status < 300) {
+          const data = JSON.parse(xhr.responseText);
+          // show preview
+          img.src = `/api/preview/${endpoint}?t=${Date.now()}`;
+          img.onload = () => { zone.classList.add('has-image'); };
+          onSuccess && onSuccess(data);
+          res(data);
+        } else rej(new Error(xhr.status));
+      };
+      xhr.onerror = rej;
+      xhr.open('POST', `/api/upload/${endpoint}`);
+      xhr.send(fd);
+    });
+  }
+
+  input.addEventListener('change', e => upload(e.target.files[0]));
+  zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', ()=> zone.classList.remove('drag-over'));
+  zone.addEventListener('drop',      e => {
+    e.preventDefault(); zone.classList.remove('drag-over');
+    upload(e.dataTransfer.files[0]);
+  });
+}
+
+makeDropZone('source-zone','source-input','source-img','source-prog','source', null);
+makeDropZone('target-zone','target-input','target-img','target-prog','target', d => {
+  const badge = $('target-type-badge');
+  badge.textContent = d.type || '';
+  badge.classList.toggle('hidden', !d.type);
+});
+
+// Random face
+$('btn-random').addEventListener('click', async () => {
+  $('btn-random').disabled = true;
+  $('btn-random').textContent = '…';
+  try {
+    await api('POST', '/api/random-face');
+    const img = $('source-img');
+    img.src = `/api/preview/source?t=${Date.now()}`;
+    img.onload = () => $('source-zone').classList.add('has-image');
+  } catch(e) { alert('Failed to fetch random face: ' + e.message); }
+  finally {
+    $('btn-random').disabled = false;
+    $('btn-random').innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15"/></svg> Random`;
+  }
+});
+
+// ── Preview helpers ───────────────────────────────────────────────────────────
+let _liveActive   = false;
+let _outputReady  = false;
+
+function showPreview(which) {
+  // which: 'none' | 'live' | 'output'
+  $('img-live').style.display   = (which === 'live')   ? 'block' : 'none';
+  $('img-output').style.display = (which === 'output') ? 'block' : 'none';
+  $('preview-placeholder').style.display = (which === 'none') ? 'flex' : 'none';
+}
+
+// ── Process start/stop ────────────────────────────────────────────────────────
+$('btn-start').addEventListener('click', async () => {
+  if (_liveActive) { await stopLive(); }
+  try {
+    await api('POST', '/api/process/start');
+    setBusy(true);
+    showPreview('none');
+  } catch(e) { alert('Start failed: ' + e.message); }
+});
+
+$('btn-stop').addEventListener('click', async () => {
+  if (_liveActive) { await stopLive(); return; }
+  try {
+    await api('POST', '/api/process/stop');
+    setBusy(false);
+  } catch(e) { console.warn(e); }
+});
+
+function setBusy(yes) {
+  $('btn-start').disabled = yes;
+  $('btn-live').disabled  = yes;
+  $('btn-stop').disabled  = !yes;
+  if (!yes) $('prog-fill').style.width = '0%';
+}
+
+// ── Live mode ─────────────────────────────────────────────────────────────────
+$('btn-live').addEventListener('click', async () => {
+  if (_liveActive) { await stopLive(); return; }
+  await startLive();
+});
+
+async function startLive() {
+  const camIdx = parseInt($('sel-camera').value);
+  try {
+    await api('POST', '/api/live/start', { camera_index: camIdx });
+    _liveActive = true;
+    // Set MJPEG img source
+    $('img-live').src = `/api/live/stream?t=${Date.now()}`;
+    $('img-live').onerror = () => { if (_liveActive) stopLive(); };
+    showPreview('live');
+    $('btn-live').classList.remove('btn-green');
+    $('btn-live').classList.add('btn-red');
+    $('btn-live').innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2"/></svg> Stop Live`;
+    $('btn-stop').disabled  = false;
+    $('btn-start').disabled = true;
+    $('live-badge').style.display = 'flex';
+  } catch(e) { alert('Live start failed: ' + e.message); }
+}
+
+async function stopLive() {
+  try { await api('POST', '/api/live/stop'); } catch(e) { console.warn(e); }
+  _liveActive = false;
+  $('img-live').src = '';
+  showPreview('none');
+  $('btn-live').classList.remove('btn-red');
+  $('btn-live').classList.add('btn-green');
+  $('btn-live').innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="m10 15 5-3-5-3v6z"/></svg> Live`;
+  $('btn-stop').disabled  = true;
+  $('btn-start').disabled = false;
+  $('live-badge').style.display = 'none';
+}
+
+// ── Status polling ────────────────────────────────────────────────────────────
+const DOT_COLORS = { ready:'#64748b', busy:'#3b82f6', live:'#22c55e', error:'#ef4444' };
+
+async function pollStatus() {
+  try {
+    const s = await api('GET', '/api/status');
+
+    // status text
+    $('status-detail').textContent = s.status;
+    $('status-text').textContent   = s.status;
+
+    // progress bar
+    const pct = Math.round(s.progress * 100);
+    $('prog-fill').style.width = pct + '%';
+    $('pct-label').textContent = s.busy ? pct + '%' : '';
+
+    // dot color
+    let dotColor = DOT_COLORS.ready;
+    if (s.live)  dotColor = DOT_COLORS.live;
+    else if (s.busy) dotColor = DOT_COLORS.busy;
+    $('status-dot').style.background = dotColor;
+
+    // busy state
+    if (s.busy) setBusy(true);
+    else if (!_liveActive) setBusy(false);
+
+    // output ready
+    if (s.has_output && !s.busy && !_liveActive) {
+      $('btn-dl').classList.remove('hidden');
+      if (!_outputReady) {
+        _outputReady = true;
+        $('img-output').src = `/api/preview/output?t=${Date.now()}`;
+        $('img-output').onload = () => showPreview('output');
+      }
+    } else if (!s.has_output) {
+      $('btn-dl').classList.add('hidden');
+      _outputReady = false;
+    }
+
+  } catch(e) {
+    $('status-dot').style.background = DOT_COLORS.error;
+  }
+}
+setInterval(pollStatus, 800);
+
+// ── Download ──────────────────────────────────────────────────────────────────
+$('btn-dl').addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.href = '/api/download';
+  a.click();
+});
+
+// ── Version badge ─────────────────────────────────────────────────────────────
+async function loadVersion() {
+  try {
+    // scrape version from modules.metadata via a lightweight endpoint fallback
+    $('version-badge').textContent = 'v3';
+  } catch(e) {}
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+(async () => {
+  await Promise.all([loadSettings(), loadCameras()]);
+  await pollStatus();
+  loadVersion();
+})();
+</script>
+</body>
+</html>
