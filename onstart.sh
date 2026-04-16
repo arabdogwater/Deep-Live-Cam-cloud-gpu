@@ -6,8 +6,8 @@ set -e
 # GUI in browser: http://<instance-ip>:8080/vnc.html
 # ──────────────────────────────────────────────────────────────────────────────
 
-NOVNC_PORT=6080
-RTSP_PORT=8554        # port your local machine pushes webcam stream to
+NOVNC_PORT=1111
+RTSP_PORT=48207       # port your local machine pushes webcam stream to
 VIRTUAL_CAM=/dev/video10  # virtual webcam device Deep-Live-Cam will open
 
 REPO_URL="https://github.com/arabdogwater/Deep-Live-Cam-cloud-gpu"
@@ -209,11 +209,10 @@ echo ""
 echo "╔═══════════════════════════════════════════════════╗"
 echo "║  Setup complete in ${TOTAL}s"
 echo "║"
-echo "║  GUI (browser):  http://<instance-ip>:${NOVNC_PORT}/vnc.html"
-echo "║  Push webcam to: rtsp://<instance-ip>:${RTSP_PORT}/webcam"
+echo "║  GUI (browser):  http://77.48.24.250:48253/vnc.html"
+echo "║  Push webcam to: rtsp://77.48.24.250:48207/webcam"
 echo "║"
-echo "║  Open ports in vast.ai: ${NOVNC_PORT} (noVNC)  ${RTSP_PORT} (RTSP)"
-echo "║  Instance must be set to PRIVILEGED for webcam"
+echo "║  Ports already open on this instance."
 echo "╚═══════════════════════════════════════════════════╝"
 echo ""
 

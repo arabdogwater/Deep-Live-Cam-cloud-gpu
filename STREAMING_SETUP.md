@@ -45,8 +45,8 @@ pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
 ### Open Ports
 In **Edit Instance → Expose Ports**, add:
-- `6080` — noVNC browser GUI
-- `8554` — RTSP webcam stream input
+- `1111` — noVNC browser GUI  (external: `77.48.24.250:48253`)
+- `48207` — RTSP webcam stream input  (external: `77.48.24.250:48207`)
 
 ### On-Start Script
 Paste this into the vast.ai "On-Start Script" field:
@@ -107,7 +107,7 @@ Replace `<instance-ip>` with your vast.ai instance's public IP.
 ffmpeg -f dshow -i video="YOUR WEBCAM NAME HERE" `
   -vcodec libx264 -preset ultrafast -tune zerolatency `
   -pix_fmt yuv420p -b:v 2M -maxrate 2M -bufsize 4M `
-  -f rtsp rtsp://<instance-ip>:8554/webcam
+  -f rtsp rtsp://77.48.24.250:48207/webcam
 ```
 
 ### macOS
@@ -115,7 +115,7 @@ ffmpeg -f dshow -i video="YOUR WEBCAM NAME HERE" `
 ffmpeg -f avfoundation -framerate 30 -i "0" \
   -vcodec libx264 -preset ultrafast -tune zerolatency \
   -pix_fmt yuv420p -b:v 2M -maxrate 2M -bufsize 4M \
-  -f rtsp rtsp://<instance-ip>:8554/webcam
+  -f rtsp rtsp://77.48.24.250:48207/webcam
 ```
 
 ### Linux
@@ -123,7 +123,7 @@ ffmpeg -f avfoundation -framerate 30 -i "0" \
 ffmpeg -f v4l2 -framerate 30 -i /dev/video0 \
   -vcodec libx264 -preset ultrafast -tune zerolatency \
   -pix_fmt yuv420p -b:v 2M -maxrate 2M -bufsize 4M \
-  -f rtsp rtsp://<instance-ip>:8554/webcam
+  -f rtsp rtsp://77.48.24.250:48207/webcam
 ```
 
 Keep this terminal open — it must stay running while you use Deep-Live-Cam.
@@ -134,7 +134,7 @@ Keep this terminal open — it must stay running while you use Deep-Live-Cam.
 
 1. Open your browser and go to:
    ```
-   http://<instance-ip>:6080/vnc.html
+   http://77.48.24.250:48253/vnc.html
    ```
 2. Click **Connect**
 3. The Deep-Live-Cam GUI will appear
