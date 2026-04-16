@@ -7,6 +7,9 @@ set -e
 # ──────────────────────────────────────────────────────────────────────────────
 
 NOVNC_PORT=8080
+RTSP_PORT=8554        # port your local machine pushes webcam stream to
+VIRTUAL_CAM=/dev/video10  # virtual webcam device Deep-Live-Cam will open
+
 REPO_URL="https://github.com/arabdogwater/Deep-Live-Cam-cloud-gpu"
 APP_DIR="/workspace/Deep-Live-Cam"
 VENV_DIR="$APP_DIR/venv"
@@ -39,7 +42,7 @@ echo "  Started at $(date)"
 step "Installing system packages"
 info "Running apt-get update..."
 apt-get update -qq
-info "Installing ffmpeg, tkinter, xvfb, x11vnc, noVNC..."
+info "Installing ffmpeg, tkinter, xvfb, x11vnc, noVNC, v4l2loopback..."
 apt-get install -y --no-install-recommends \
     git \
     ffmpeg \
@@ -53,7 +56,10 @@ apt-get install -y --no-install-recommends \
     xvfb \
     x11vnc \
     novnc \
-    websockify 2>&1 | grep -E "^(Get|Unpacking|Setting up|Processing)" | sed 's/^/  | /' || true
+    websockify \
+    v4l2loopback-dkms \
+    v4l2loopback-utils \
+    linux-headers-$(uname -r) 2>&1 | grep -E "^(Get|Unpacking|Setting up|Processing)" | sed 's/^/  | /' || true
 ok "System packages ready"
 elapsed
 
@@ -129,7 +135,52 @@ else
 fi
 elapsed
 
-# ── 6. Launch virtual display + noVNC ─────────────────────────────────────────
+# ── 6. Virtual webcam + RTSP server (for live streaming from local machine) ────
+step "Setting up virtual webcam (v4l2loopback + MediaMTX)"
+
+# Load v4l2loopback kernel module to create a virtual webcam device
+if ! lsmod | grep -q v4l2loopback; then
+    info "Loading v4l2loopback kernel module..."
+    modprobe v4l2loopback devices=1 video_nr=10 card_label="VirtualCam" exclusive_caps=1 || \
+        { echo "  ✘  v4l2loopback failed — ensure instance is set to 'Privileged' in vast.ai"; }
+fi
+ok "Virtual webcam at $VIRTUAL_CAM"
+
+# Install MediaMTX (lightweight RTSP server) if not already present
+MEDIAMTX_BIN="/usr/local/bin/mediamtx"
+if [ ! -f "$MEDIAMTX_BIN" ]; then
+    info "Downloading MediaMTX RTSP server..."
+    MEDIAMTX_VER="v1.9.3"
+    wget -q "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VER}/mediamtx_${MEDIAMTX_VER}_linux_amd64.tar.gz" \
+        -O /tmp/mediamtx.tar.gz
+    tar -xzf /tmp/mediamtx.tar.gz -C /usr/local/bin mediamtx
+    chmod +x "$MEDIAMTX_BIN"
+    rm /tmp/mediamtx.tar.gz
+fi
+ok "MediaMTX ready"
+
+# Start MediaMTX (accepts RTSP pushes on port $RTSP_PORT)
+info "Starting MediaMTX RTSP server on port $RTSP_PORT ..."
+mediamtx &>/tmp/mediamtx.log &
+sleep 1
+ok "RTSP server listening on port $RTSP_PORT"
+
+# Bridge: once a stream arrives at rtsp://localhost:$RTSP_PORT/webcam, feed it into v4l2loopback
+info "Starting ffmpeg bridge (RTSP → $VIRTUAL_CAM)..."
+(
+    while true; do
+        ffmpeg -rtsp_transport tcp \
+               -i "rtsp://localhost:$RTSP_PORT/webcam" \
+               -vf "scale=1280:720" \
+               -f v4l2 "$VIRTUAL_CAM" \
+               -loglevel error 2>/tmp/ffmpeg-bridge.log || true
+        sleep 2  # retry if stream drops
+    done
+) &
+ok "Webcam bridge ready — push your stream to rtsp://<instance-ip>:$RTSP_PORT/webcam"
+elapsed
+
+# ── 7. Launch virtual display + noVNC ─────────────────────────────────────────
 step "Starting virtual display and noVNC"
 
 export DISPLAY=:99
@@ -150,18 +201,19 @@ sleep 1
 ok "noVNC running"
 elapsed
 
-# ── 7. Launch Deep-Live-Cam ───────────────────────────────────────────────────
+# ── 8. Launch Deep-Live-Cam ───────────────────────────────────────────────────
 step "Launching Deep-Live-Cam"
 
 TOTAL=$(($(date +%s) - START_TIME))
 echo ""
 echo "╔═══════════════════════════════════════════════════╗"
-echo "║  Setup complete in ${TOTAL}s                               "
-echo "║                                                   ║"
-echo "║  Open in browser:                                 ║"
-echo "║  http://<instance-ip>:${NOVNC_PORT}/vnc.html              "
-echo "║                                                   ║"
-echo "║  (open port ${NOVNC_PORT} in vast.ai instance settings)    "
+echo "║  Setup complete in ${TOTAL}s"
+echo "║"
+echo "║  GUI (browser):  http://<instance-ip>:${NOVNC_PORT}/vnc.html"
+echo "║  Push webcam to: rtsp://<instance-ip>:${RTSP_PORT}/webcam"
+echo "║"
+echo "║  Open ports in vast.ai: ${NOVNC_PORT} (noVNC)  ${RTSP_PORT} (RTSP)"
+echo "║  Instance must be set to PRIVILEGED for webcam"
 echo "╚═══════════════════════════════════════════════════╝"
 echo ""
 
