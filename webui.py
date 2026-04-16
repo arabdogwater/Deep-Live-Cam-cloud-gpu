@@ -462,6 +462,88 @@ async def live_stream():
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
+# ── Raw camera preview (no face swap) ─────────────────────────────────────────
+_raw_stop: threading.Event = threading.Event()
+_raw_q:    queue.Queue     = queue.Queue(maxsize=2)
+_raw_idx:  int             = -1
+
+def _raw_cam_thread(idx: int, q: queue.Queue, stop: threading.Event):
+    cap = cv2.VideoCapture(idx)
+    if not cap.isOpened():
+        stop.set()
+        return
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    while not stop.is_set():
+        ok, frame = cap.read()
+        if not ok:
+            stop.set()
+            break
+        try:
+            q.put_nowait(frame)
+        except queue.Full:
+            try: q.get_nowait()
+            except queue.Empty: pass
+            try: q.put_nowait(frame)
+            except queue.Full: pass
+    cap.release()
+
+@app.get("/api/cam/stream")
+async def cam_stream(index: int = 10):
+    global _raw_stop, _raw_q, _raw_idx
+    # restart raw thread if camera changed or stopped
+    if _raw_idx != index or _raw_stop.is_set():
+        _raw_stop.set()
+        _raw_stop = threading.Event()
+        _raw_q    = queue.Queue(maxsize=2)
+        _raw_idx  = index
+        threading.Thread(target=_raw_cam_thread, args=(index, _raw_q, _raw_stop), daemon=True).start()
+
+    async def _gen():
+        loop = asyncio.get_event_loop()
+        while not _raw_stop.is_set():
+            try:
+                frame = await loop.run_in_executor(None, lambda: _raw_q.get(timeout=0.5))
+            except Exception:
+                break
+            ok, j = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 72])
+            if ok:
+                yield (
+                    b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                    + j.tobytes() + b"\r\n"
+                )
+
+    return StreamingResponse(_gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+# ── RTSP / virtual cam stream status ──────────────────────────────────────────
+@app.get("/api/rtsp-status")
+def rtsp_status():
+    """Check if the webcam RTSP stream from stream-webcam.bat is active."""
+    import urllib.request, json as _json
+    # MediaMTX exposes a REST API on port 9997
+    try:
+        with urllib.request.urlopen("http://localhost:9997/v3/paths/list", timeout=1) as r:
+            data = _json.loads(r.read())
+        paths = data.get("items", [])
+        for p in paths:
+            if p.get("name") == "webcam" and p.get("ready"):
+                readers = p.get("readersCount", 0)
+                return {"connected": True, "readers": readers}
+        return {"connected": False}
+    except Exception:
+        pass
+    # Fallback: try to open the virtual cam and grab a frame
+    try:
+        cap = cv2.VideoCapture(10)
+        if cap.isOpened():
+            ok, _ = cap.read()
+            cap.release()
+            return {"connected": ok}
+        cap.release()
+    except Exception:
+        pass
+    return {"connected": False}
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
