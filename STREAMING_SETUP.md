@@ -88,14 +88,14 @@ frame=  42 fps= 30 q=28.0 size=    512kB time=00:00:01.40 bitrate=2994.3kbits/s
 Once the ffmpeg stream is running, open your browser and go to:
 
 ```
-http://77.48.24.250:48253/vnc.html
+http://<INSTANCE_IP>:<WEBUI_EXTERNAL_PORT>/
 ```
 
-Click **Connect** (no password). The Deep-Live-Cam window will appear.
+The IP and port are printed in the boot log when the instance starts (look for the `╔═══` summary box). You can also find it in the vast.ai instance panel under "Open".
 
-1. Click **Select Face** → choose a face image from your machine (upload via the noVNC clipboard or use a pre-uploaded file)
-2. Click the **Camera dropdown** → select **`/dev/video10`**
-3. Click **Live** → real-time face swap starts
+1. **Upload a face image** — drag & drop into the Source Face panel on the left
+2. **Select your camera** — pick `Camera 10 (v4l2)` from the dropdown (this is your streamed webcam)
+3. Click **Live** → real-time face swap starts streaming in your browser
 
 ---
 
