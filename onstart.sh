@@ -2,22 +2,44 @@
 set -e
 
 # ─── Deep-Live-Cam – vast.ai onstart script ───────────────────────────────────
-# Clones the repo, installs deps, downloads models, then launches the app.
 # Designed for: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
-#
-# Access the GUI in your browser at:  http://<instance-ip>:8080/vnc.html
-# Make sure port 8080 is open in your vast.ai instance port settings.
+# GUI in browser: http://<instance-ip>:8080/vnc.html
 # ──────────────────────────────────────────────────────────────────────────────
 
 NOVNC_PORT=8080
-
 REPO_URL="https://github.com/arabdogwater/Deep-Live-Cam-cloud-gpu"
 APP_DIR="/workspace/Deep-Live-Cam"
 VENV_DIR="$APP_DIR/venv"
 MODELS_DIR="$APP_DIR/models"
 
+# ── Helpers ────────────────────────────────────────────────────────────────────
+STEP=0
+step() {
+    STEP=$((STEP + 1))
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  STEP $STEP — $1"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+ok()   { echo "  ✔  $1"; }
+info() { echo "  →  $1"; }
+
+START_TIME=$(date +%s)
+elapsed() {
+    echo "  ⏱  $(($(date +%s) - START_TIME))s elapsed"
+}
+
+echo ""
+echo "╔═══════════════════════════════════════════════════╗"
+echo "║        Deep-Live-Cam  —  vast.ai startup          ║"
+echo "╚═══════════════════════════════════════════════════╝"
+echo "  Started at $(date)"
+
 # ── 1. System packages ─────────────────────────────────────────────────────────
+step "Installing system packages"
+info "Running apt-get update..."
 apt-get update -qq
+info "Installing ffmpeg, tkinter, xvfb, x11vnc, noVNC..."
 apt-get install -y --no-install-recommends \
     git \
     ffmpeg \
@@ -31,70 +53,116 @@ apt-get install -y --no-install-recommends \
     xvfb \
     x11vnc \
     novnc \
-    websockify 2>&1 | tail -5
+    websockify 2>&1 | grep -E "^(Get|Unpacking|Setting up|Processing)" | sed 's/^/  | /' || true
+ok "System packages ready"
+elapsed
 
-# ── 2. Clone repo ──────────────────────────────────────────────────────────────
+# ── 2. Clone / update repo ────────────────────────────────────────────────────
+step "Fetching repository"
 if [ -d "$APP_DIR/.git" ]; then
-    echo "[onstart] Repo already cloned – pulling latest..."
+    info "Repo exists — pulling latest changes..."
     git -C "$APP_DIR" pull
+    ok "Repository up to date"
 else
-    echo "[onstart] Cloning $REPO_URL ..."
+    info "Cloning $REPO_URL ..."
     git clone "$REPO_URL" "$APP_DIR"
+    ok "Repository cloned"
 fi
+elapsed
 
 cd "$APP_DIR"
 
-# ── 3. Python venv ─────────────────────────────────────────────────────────────
+# ── 3. Python virtual environment ─────────────────────────────────────────────
+step "Setting up Python venv"
 if [ ! -d "$VENV_DIR" ]; then
+    info "Creating venv at $VENV_DIR ..."
     python3 -m venv "$VENV_DIR"
+    ok "venv created"
+else
+    ok "venv already exists — skipping"
 fi
 source "$VENV_DIR/bin/activate"
+info "Python: $(python --version)"
+elapsed
 
-# ── 4. Install Python dependencies ────────────────────────────────────────────
+# ── 4. Python dependencies ────────────────────────────────────────────────────
+step "Installing Python dependencies"
+
+info "Upgrading pip..."
 pip install --upgrade pip -q
 
-# Install PyTorch for CUDA 12.4 first (ensures correct CUDA-linked torch)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 -q
+info "Installing PyTorch (CUDA 12.4) — this may take a few minutes..."
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 2>&1 \
+    | grep -E "^(Collecting|Downloading|Installing|Successfully)" | sed 's/^/  | /' || true
+ok "PyTorch installed"
 
-# Install the rest of the project requirements
-pip install -r requirements.txt -q
+info "Installing project requirements..."
+pip install -r requirements.txt 2>&1 \
+    | grep -E "^(Collecting|Downloading|Installing|Successfully)" | sed 's/^/  | /' || true
+ok "All Python dependencies installed"
+elapsed
 
-# ── 5. Download models (skips if already present) ─────────────────────────────
+# ── 5. Download models ────────────────────────────────────────────────────────
+step "Downloading models"
 mkdir -p "$MODELS_DIR"
 
 INSWAPPER="$MODELS_DIR/inswapper_128_fp16.onnx"
-if [ ! -f "$INSWAPPER" ]; then
-    echo "[onstart] Downloading inswapper_128_fp16.onnx ..."
-    wget -q --show-progress \
+if [ -f "$INSWAPPER" ]; then
+    ok "inswapper_128_fp16.onnx already present — skipping"
+else
+    info "Downloading inswapper_128_fp16.onnx (~170 MB)..."
+    wget --progress=bar:force:noscroll \
         "https://huggingface.co/hacksider/deep-live-cam/resolve/main/inswapper_128_fp16.onnx" \
-        -O "$INSWAPPER"
+        -O "$INSWAPPER" 2>&1 | tail -3
+    ok "inswapper_128_fp16.onnx downloaded"
 fi
 
 GFPGAN="$MODELS_DIR/GFPGANv1.4.onnx"
-if [ ! -f "$GFPGAN" ]; then
-    echo "[onstart] Downloading GFPGANv1.4.onnx ..."
-    wget -q --show-progress \
+if [ -f "$GFPGAN" ]; then
+    ok "GFPGANv1.4.onnx already present — skipping"
+else
+    info "Downloading GFPGANv1.4.onnx (~350 MB)..."
+    wget --progress=bar:force:noscroll \
         "https://huggingface.co/hacksider/deep-live-cam/resolve/main/GFPGANv1.4.onnx" \
-        -O "$GFPGAN"
+        -O "$GFPGAN" 2>&1 | tail -3
+    ok "GFPGANv1.4.onnx downloaded"
 fi
+elapsed
 
-echo "[onstart] Models ready."
+# ── 6. Launch virtual display + noVNC ─────────────────────────────────────────
+step "Starting virtual display and noVNC"
 
-# ── 6. Launch ──────────────────────────────────────────────────────────────────
-# Xvfb: virtual display
 export DISPLAY=:99
+info "Starting Xvfb on $DISPLAY ..."
 Xvfb :99 -screen 0 1920x1080x24 &
 sleep 1
+ok "Xvfb running"
 
-# x11vnc: exposes the virtual display as a VNC server (localhost only)
+info "Starting x11vnc (VNC server)..."
 x11vnc -display :99 -nopw -listen localhost -forever -quiet &
 sleep 1
+ok "x11vnc running"
 
-# noVNC + websockify: serves the browser-based GUI on port $NOVNC_PORT
-# Access at: http://<instance-ip>:8080/vnc.html
-NOVNC_PATH=$(find /usr/share -name "vnc.html" 2>/dev/null | head -1 | xargs dirname || echo "/usr/share/novnc")
+info "Starting noVNC on port $NOVNC_PORT ..."
+NOVNC_PATH=$(find /usr/share -name "vnc.html" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo "/usr/share/novnc")
 websockify --web="$NOVNC_PATH" $NOVNC_PORT localhost:5900 &
-echo "[onstart] noVNC running on port $NOVNC_PORT  →  http://<instance-ip>:$NOVNC_PORT/vnc.html"
+sleep 1
+ok "noVNC running"
+elapsed
 
-echo "[onstart] Starting Deep-Live-Cam with CUDA..."
-python run.py --execution-provider cuda
+# ── 7. Launch Deep-Live-Cam ───────────────────────────────────────────────────
+step "Launching Deep-Live-Cam"
+
+TOTAL=$(($(date +%s) - START_TIME))
+echo ""
+echo "╔═══════════════════════════════════════════════════╗"
+echo "║  Setup complete in ${TOTAL}s                               "
+echo "║                                                   ║"
+echo "║  Open in browser:                                 ║"
+echo "║  http://<instance-ip>:${NOVNC_PORT}/vnc.html              "
+echo "║                                                   ║"
+echo "║  (open port ${NOVNC_PORT} in vast.ai instance settings)    "
+echo "╚═══════════════════════════════════════════════════╝"
+echo ""
+
+exec python run.py --execution-provider cuda
