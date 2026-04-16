@@ -97,10 +97,16 @@ step "Installing Python dependencies"
 info "Upgrading pip..."
 pip install --upgrade pip -q
 
-info "Installing PyTorch (CUDA 12.4) — this may take a few minutes..."
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 2>&1 \
-    | grep -E "^(Collecting|Downloading|Installing|Successfully)" | sed 's/^/  | /' || true
-ok "PyTorch installed"
+# PyTorch is pre-installed in pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+# Only install if missing (e.g. someone used a different base image)
+if python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+    ok "PyTorch $(python -c 'import torch; print(torch.__version__)') with CUDA already present — skipping"
+else
+    info "PyTorch not found — installing for CUDA 12.4..."
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 2>&1 \
+        | grep -E "^(Collecting|Downloading|Installing|Successfully)" | sed 's/^/  | /' || true
+    ok "PyTorch installed"
+fi
 
 info "Installing project requirements..."
 pip install -r requirements.txt 2>&1 \
