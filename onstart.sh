@@ -3,11 +3,22 @@ set -e
 
 # ─── Deep-Live-Cam – vast.ai onstart script ───────────────────────────────────
 # Designed for: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
-# GUI in browser: http://<instance-ip>:8080/vnc.html
+# GUI in browser: open the port you set as OPEN_BUTTON_PORT (default 8080)
+# Ports to open in your vast.ai template: 8080 (noVNC), 8554 (RTSP)
 # ──────────────────────────────────────────────────────────────────────────────
 
-NOVNC_PORT=1111
-RTSP_PORT=48207       # port your local machine pushes webcam stream to
+# ── Port config (driven by vast.ai env vars) ─────────────────────────────────
+# vast.ai injects these into every container:
+#   OPEN_BUTTON_PORT    — internal port the "Open" button in the UI points to
+#   VAST_TCP_PORT_XXXX  — external (host-side) port mapped to internal port XXXX
+#   PUBLIC_IPADDR       — public IP of the instance
+#
+# In your vast.ai template, add open ports: 8080 (noVNC) and 8554 (RTSP).
+# Set OPEN_BUTTON_PORT=8080 as the primary port in the template.
+# Override RTSP_PORT here only if you open a different port in the template.
+NOVNC_PORT=${OPEN_BUTTON_PORT:-8080}   # internal port noVNC binds on
+RTSP_PORT=${RTSP_PORT:-8554}           # internal port MediaMTX RTSP listens on
+INSTANCE_IP=${PUBLIC_IPADDR:-$(hostname -I | awk '{print $1}')}
 VIRTUAL_CAM=/dev/video10  # virtual webcam device Deep-Live-Cam will open
 
 REPO_URL="https://github.com/arabdogwater/Deep-Live-Cam-cloud-gpu"
@@ -179,6 +190,8 @@ ok "MediaMTX ready"
 
 # Start MediaMTX (accepts RTSP pushes on port $RTSP_PORT)
 info "Starting MediaMTX RTSP server on port $RTSP_PORT ..."
+# MTX_RTSPADDRESS tells MediaMTX which port to bind without needing a config file
+export MTX_RTSPADDRESS=":${RTSP_PORT}"
 mediamtx &>/tmp/mediamtx.log &
 sleep 1
 ok "RTSP server listening on port $RTSP_PORT"
@@ -225,15 +238,20 @@ elapsed
 # ── 8. Launch Deep-Live-Cam ───────────────────────────────────────────────────
 step "Launching Deep-Live-Cam"
 
+# Resolve external ports: vast.ai sets VAST_TCP_PORT_XXXX = external port for internal port XXXX
+_novnc_ext=$(eval "echo \${VAST_TCP_PORT_${NOVNC_PORT}:-${NOVNC_PORT}}")
+_rtsp_ext=$(eval "echo \${VAST_TCP_PORT_${RTSP_PORT}:-${RTSP_PORT}}")
+
 TOTAL=$(($(date +%s) - START_TIME))
 echo ""
 echo "╔═══════════════════════════════════════════════════╗"
 echo "║  Setup complete in ${TOTAL}s"
 echo "║"
-echo "║  GUI (browser):  http://77.48.24.250:48253/vnc.html"
-echo "║  Push webcam to: rtsp://77.48.24.250:48207/webcam"
+echo "║  GUI (browser):  http://${INSTANCE_IP}:${_novnc_ext}/vnc.html"
+echo "║  Push webcam to: rtsp://${INSTANCE_IP}:${_rtsp_ext}/webcam"
 echo "║"
-echo "║  Ports already open on this instance."
+echo "║  noVNC internal:${NOVNC_PORT}  external:${_novnc_ext}"
+echo "║  RTSP  internal:${RTSP_PORT}  external:${_rtsp_ext}"
 echo "╚═══════════════════════════════════════════════════╝"
 echo ""
 
