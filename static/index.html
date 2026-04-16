@@ -486,13 +486,10 @@ let ws       = null;      // WebSocket to GPU
 let isLive   = false;
 let hasFace  = false;
 let localStream  = null;  // MediaStream from getUserMedia
-let captureTimer = null;  // setInterval ID for frame capture
 
 const videoEl      = $('local-cam');
 const outputCanvas = $('output-canvas');
 const outputCtx    = outputCanvas.getContext('2d');
-const sendCanvas   = document.createElement('canvas');
-const sendCtx      = sendCanvas.getContext('2d');
 
 // ═══════════ GPU API helper (all calls go to the remote GPU) ══════════
 async function gpu(method, path, body) {
@@ -812,7 +809,7 @@ async function startLive() {
     };
 
     // Start capturing and sending frames
-    startFrameCapture();
+    await startFrameCapture();
 
   } catch(e) {
     if (ws) { try { ws.close(); } catch(_){} ws = null; }
@@ -842,32 +839,107 @@ async function stopLive() {
 }
 
 // ═══════════════════ FRAME CAPTURE & SEND ════════════════════════════
-const SEND_W = 640;
-const SEND_H = 480;
-const SEND_FPS = 15;
+// Uses WebCodecs VideoEncoder: hardware-accelerated H.264, 1280×720 @ 30fps.
+// Graceful fallback to JPEG for Safari / browsers without VideoEncoder support.
+const HAS_WEBCODECS = typeof VideoEncoder !== 'undefined' &&
+                      typeof MediaStreamTrackProcessor !== 'undefined';
 
-function startFrameCapture() {
+const SEND_W   = 1280;
+const SEND_H   = 720;
+const SEND_FPS = 30;
+
+let _encoder     = null;
+let _frameReader = null;
+let _jpegTimer   = null;
+const _sendCanvas = document.createElement('canvas');
+const _sendCtx    = _sendCanvas.getContext('2d');
+
+async function startFrameCapture() {
   stopFrameCapture();
-  captureTimer = setInterval(() => {
+
+  if (HAS_WEBCODECS) {
+    // ── Hardware H.264 path (Chrome, Edge, Firefox) ────────────────────────
+    const h264Config = {
+      codec:                 'avc1.640034', // H.264 High Profile Level 5.2
+      width:                  SEND_W,
+      height:                 SEND_H,
+      bitrate:                3_500_000,    // 3.5 Mbps — crisp at 720p
+      framerate:              SEND_FPS,
+      hardwareAcceleration:  'prefer-hardware',
+      avc:                   { format: 'annexb' }, // raw NAL units, PyAV-compatible
+      latencyMode:           'realtime',
+    };
+
+    let supported = false;
+    try {
+      const check = await VideoEncoder.isConfigSupported(h264Config);
+      supported = check.supported;
+    } catch(e) {}
+
+    if (supported) {
+      _encoder = new VideoEncoder({
+        output: (chunk) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          const payload = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(payload);
+          // 1-byte header: 0x01 = keyframe, 0x02 = delta frame
+          const msg = new Uint8Array(1 + payload.length);
+          msg[0] = chunk.type === 'key' ? 0x01 : 0x02;
+          msg.set(payload, 1);
+          ws.send(msg.buffer);
+        },
+        error: (e) => console.warn('[WebCodecs encoder]', e),
+      });
+      _encoder.configure(h264Config);
+
+      const track = localStream.getVideoTracks()[0];
+      const processor = new MediaStreamTrackProcessor({ track });
+      _frameReader = processor.readable.getReader();
+
+      let fcount = 0;
+      (async () => {
+        while (isLive) {
+          let result;
+          try { result = await _frameReader.read(); } catch(e) { break; }
+          if (result.done || !result.value) break;
+          const vf = result.value;
+          if (_encoder?.state === 'configured') {
+            // Keyframe every 2 s so the server can always re-sync
+            _encoder.encode(vf, { keyFrame: fcount % (SEND_FPS * 2) === 0 });
+          }
+          vf.close();
+          fcount++;
+        }
+      })();
+      return; // ✔ WebCodecs path active
+    }
+  }
+
+  // ── JPEG fallback (Safari / older browsers) ──────────────────────────────
+  // Still 1280×720 @ 30fps — just no inter-frame compression
+  _jpegTimer = setInterval(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (!videoEl.videoWidth || !videoEl.videoHeight) return;
-
-    sendCanvas.width  = SEND_W;
-    sendCanvas.height = SEND_H;
-    sendCtx.drawImage(videoEl, 0, 0, SEND_W, SEND_H);
-
-    sendCanvas.toBlob(blob => {
-      if (blob && ws && ws.readyState === WebSocket.OPEN) {
-        blob.arrayBuffer().then(buf => {
-          if (ws && ws.readyState === WebSocket.OPEN) ws.send(buf);
-        });
-      }
-    }, 'image/jpeg', 0.85);
+    if (!videoEl.videoWidth) return;
+    _sendCanvas.width  = SEND_W;
+    _sendCanvas.height = SEND_H;
+    _sendCtx.drawImage(videoEl, 0, 0, SEND_W, SEND_H);
+    _sendCanvas.toBlob(blob => {
+      if (!blob || !ws || ws.readyState !== WebSocket.OPEN) return;
+      blob.arrayBuffer().then(buf => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const msg = new Uint8Array(1 + buf.byteLength);
+        msg[0] = 0x00; // JPEG type byte
+        msg.set(new Uint8Array(buf), 1);
+        ws.send(msg.buffer);
+      });
+    }, 'image/jpeg', 0.92);
   }, Math.round(1000 / SEND_FPS));
 }
 
 function stopFrameCapture() {
-  if (captureTimer) { clearInterval(captureTimer); captureTimer = null; }
+  if (_jpegTimer)   { clearInterval(_jpegTimer);          _jpegTimer   = null; }
+  if (_frameReader) { try { _frameReader.cancel(); } catch(e) {} _frameReader = null; }
+  if (_encoder)     { try { _encoder.close();      } catch(e) {} _encoder     = null; }
 }
 
 // ═══════════════════ SETTINGS ════════════════════════════════════════

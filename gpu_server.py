@@ -21,6 +21,28 @@ from typing import Optional
 import cv2
 import numpy as np
 
+# ── Optional: PyAV for H.264 decoding (WebCodecs input) ───────────────────────
+try:
+    import av as _pyav
+    _HAS_AV = True
+except ImportError:
+    _HAS_AV = False
+    print("[GPU] PyAV not found — H.264 input disabled (pip install av)")
+
+class _H264Decoder:
+    """Decode raw H.264 annexb chunks produced by browser WebCodecs VideoEncoder."""
+    def __init__(self):
+        self._codec = _pyav.CodecContext.create('h264', 'r')
+
+    def decode(self, data: bytes) -> Optional[np.ndarray]:
+        try:
+            pkt = _pyav.Packet(data)
+            for f in self._codec.decode(pkt):
+                return f.to_ndarray(format='bgr24')
+        except Exception:
+            pass
+        return None
+
 # ── Stub tkinter-dependent modules BEFORE any project code imports them ────────
 _ui_stub = types.ModuleType("modules.ui")
 _ui_stub.update_status = lambda msg, scope="": None
@@ -324,13 +346,14 @@ async def ws_live(ws: WebSocket):
 
     # Shared state between receive loop and processing thread
     latest_frame_lock = threading.Lock()
-    latest_frame = [None]           # raw JPEG bytes from browser
+    latest_frame = [None]           # (mode, raw_bytes): mode='jpeg'|'h264'
     out_q: queue.Queue = queue.Queue(maxsize=2)
     stop = threading.Event()
 
     # ── Processing thread ──────────────────────────────────────────────────────
     def _process_loop():
         fps_procs  = get_frame_processors_modules(G.frame_processors)
+        h264_dec   = _H264Decoder() if _HAS_AV else None
         src_img    = None
         last_src   = None
         cached_face = None
@@ -341,16 +364,27 @@ async def ws_live(ws: WebSocket):
 
         while not stop.is_set():
             with latest_frame_lock:
-                fb = latest_frame[0]
+                item = latest_frame[0]
                 latest_frame[0] = None
 
-            if fb is None:
-                time.sleep(0.005)
+            if item is None:
+                time.sleep(0.003)
                 continue
 
-            nparr = np.frombuffer(fb, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if frame is None:
+            mode, raw = item
+
+            if mode == 'jpeg':
+                nparr = np.frombuffer(raw, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if frame is None:
+                    continue
+            elif mode == 'h264':
+                if h264_dec is None:
+                    continue
+                frame = h264_dec.decode(raw)
+                if frame is None:
+                    continue
+            else:
                 continue
 
             if G.live_mirror:
@@ -401,7 +435,7 @@ async def ws_live(ws: WebSocket):
                     (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 60), 2,
                 )
 
-            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 78])
+            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
             if ok:
                 data = jpg.tobytes()
                 try:
@@ -443,9 +477,18 @@ async def ws_live(ws: WebSocket):
                 break
 
             if "bytes" in msg and msg["bytes"]:
-                # Binary message = webcam frame (JPEG)
-                with latest_frame_lock:
-                    latest_frame[0] = msg["bytes"]
+                # Binary frame: 1-byte type header
+                # 0x00 = JPEG (fallback), 0x01 = H264 keyframe, 0x02 = H264 delta
+                data = bytes(msg["bytes"])
+                if data:
+                    ftype   = data[0]
+                    payload = data[1:]
+                    if ftype == 0x00:
+                        with latest_frame_lock:
+                            latest_frame[0] = ('jpeg', payload)
+                    elif ftype in (0x01, 0x02):
+                        with latest_frame_lock:
+                            latest_frame[0] = ('h264', payload)
 
             elif "text" in msg and msg["text"]:
                 data = json.loads(msg["text"])
