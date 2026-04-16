@@ -326,6 +326,16 @@ def _cap_thread(idx: int, cap_q: queue.Queue, stop: threading.Event):
     cap.release()
 
 def _proc_thread(cap_q: queue.Queue, out_q: queue.Queue, stop: threading.Event):
+    try:
+        _proc_thread_inner(cap_q, out_q, stop)
+    except Exception as e:
+        print(f"[DLC] proc_thread crashed: {e}")
+    finally:
+        # Always clean up live state so the frontend isn't left stuck
+        _st["live"] = False
+        stop.set()
+
+def _proc_thread_inner(cap_q: queue.Queue, out_q: queue.Queue, stop: threading.Event):
     fps_procs  = get_frame_processors_modules(G.frame_processors)
     src_img    = None
     last_src   = None
@@ -398,7 +408,7 @@ def _proc_thread(cap_q: queue.Queue, out_q: queue.Queue, stop: threading.Event):
 
 @app.post("/api/live/start")
 async def live_start(req: Request):
-    global _live_stop, _live_q_out
+    global _live_stop, _live_q_out, _raw_stop
     if _st["live"]:
         return {"ok": True, "already": True}
     body = await req.json()
@@ -408,6 +418,9 @@ async def live_start(req: Request):
         raise HTTPException(400, "Upload a source face first")
     if not G.frame_processors:
         G.frame_processors = ["face_swapper"]
+
+    # Stop raw preview thread so it releases the camera device before live grabs it
+    _raw_stop.set()
 
     # Pre-warm models in a thread to avoid blocking the event loop
     def _prewarm():
@@ -499,13 +512,20 @@ async def cam_stream(index: int = 10):
         _raw_idx  = index
         threading.Thread(target=_raw_cam_thread, args=(index, _raw_q, _raw_stop), daemon=True).start()
 
+    # Capture local references so the generator is not affected by later
+    # global reassignments (e.g. when a second client connects).
+    _local_stop = _raw_stop
+    _local_q    = _raw_q
+
     async def _gen():
         loop = asyncio.get_event_loop()
-        while not _raw_stop.is_set():
+        while not _local_stop.is_set():
             try:
-                frame = await loop.run_in_executor(None, lambda: _raw_q.get(timeout=0.5))
+                frame = await loop.run_in_executor(None, lambda: _local_q.get(timeout=0.5))
+            except queue.Empty:
+                continue   # camera just slow — keep waiting
             except Exception:
-                break
+                break      # real error — close stream
             ok, j = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 72])
             if ok:
                 yield (

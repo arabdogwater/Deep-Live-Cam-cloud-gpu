@@ -438,16 +438,21 @@ $('btn-refresh-cams').addEventListener('click', () => { loadCameras(); checkRtsp
 $('sel-camera').addEventListener('change', startRawPreview);
 
 // ---- Raw preview (no face swap, shows immediately on load) ----
+let _rawRetryTimer = null;
 function startRawPreview() {
   if (isLive) return;
+  clearTimeout(_rawRetryTimer);
   const idx = $('sel-camera').value || 10;
   const img = $('preview-img');
   img.src = '/api/cam/stream?index=' + idx + '&t=' + Date.now();
   img.style.display = 'block';
   $('preview-ph').style.display = 'none';
   img.onerror = function() {
+    // Camera not ready yet (v4l2loopback stream not arrived) — retry in 3s
     this.style.display = 'none';
     $('preview-ph').style.display = 'flex';
+    $('preview-ph').querySelector('.ph-sub').textContent = 'Waiting for camera feed... retrying';
+    _rawRetryTimer = setTimeout(() => { if (!isLive) startRawPreview(); }, 3000);
   };
 }
 
@@ -570,6 +575,7 @@ async function stopLive() {
   try { await api('POST', '/api/live/stop'); } catch(e) {}
   isLive = false;
   $('live-badge').style.display = 'none';
+  $('preview-ph').querySelector('.ph-sub').textContent = 'Select a camera above -- feed will appear automatically';
   updateGoLiveBtn();
   startRawPreview();
 }
