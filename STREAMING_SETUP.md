@@ -1,68 +1,16 @@
-# Real-Time Webcam Streaming to vast.ai GPU
+# Local Machine Setup — Real-Time Webcam to Deep-Live-Cam
 
-How to pipe your local webcam into Deep-Live-Cam running on a remote GPU, with the processed output visible live in your browser.
-
----
-
-## How It Works
-
-```
-[Your Webcam]
-     │
-     │  ffmpeg (local machine)
-     │  push RTSP stream
-     ▼
-[vast.ai GPU  :8554]  ← MediaMTX RTSP server receives stream
-     │
-     │  ffmpeg bridge
-     ▼
-[/dev/video10]  ← v4l2loopback virtual webcam device
-     │
-     ▼
-[Deep-Live-Cam]  ← reads /dev/video10, applies face swap with CUDA
-     │
-     ▼
-[noVNC :8080]  ← you watch the result in your browser
-```
+Everything the GPU does is handled automatically by `onstart.sh`. This guide is **only what you run on your local machine**.
 
 ---
 
-## Step 1 — vast.ai Instance Setup
+## Step 1 — Install ffmpeg
 
-### Docker Image
-```
-pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
-```
-
-### Required Settings (in the vast.ai instance config)
-| Setting | Value |
-|---|---|
-| **Run as Privileged** | ✔ ON — required for v4l2loopback kernel module |
-| **On-Start Script** | *(see below)* |
-| **Disk Space** | 30 GB minimum |
-
-> Note: vast.ai uses port `8080` for Jupyter by default — noVNC runs on `6080` to avoid conflict.
-
-### Open Ports
-In **Edit Instance → Expose Ports**, add:
-- `1111` — noVNC browser GUI  (external: `77.48.24.250:48253`)
-- `48207` — RTSP webcam stream input  (external: `77.48.24.250:48207`)
-
-### On-Start Script
-Paste this into the vast.ai "On-Start Script" field:
-```bash
-git clone https://github.com/arabdogwater/Deep-Live-Cam-cloud-gpu /workspace/Deep-Live-Cam 2>/dev/null || git -C /workspace/Deep-Live-Cam pull; bash /workspace/Deep-Live-Cam/onstart.sh
-```
-
----
-
-## Step 2 — Install ffmpeg Locally
-
-### Windows
-Download from https://ffmpeg.org/download.html or run:
+### Windows (PowerShell — run once)
 ```powershell
 winget install ffmpeg
 ```
+Then **close and reopen PowerShell** so `ffmpeg` is on your PATH.
 
 ### macOS
 ```bash
@@ -76,19 +24,19 @@ sudo apt install ffmpeg
 
 ---
 
-## Step 3 — Find Your Webcam Name
+## Step 2 — Find Your Webcam Name
 
-### Windows (PowerShell)
+### Windows
 ```powershell
 ffmpeg -list_devices true -f dshow -i dummy 2>&1 | Select-String "video"
 ```
-Look for something like `"HD Webcam"` or `"Integrated Camera"`.
+You'll see something like `"HD Webcam"` or `"Integrated Camera"`. Copy the exact name inside the quotes.
 
 ### macOS
 ```bash
 ffmpeg -f avfoundation -list_devices true -i "" 2>&1 | grep -i video
 ```
-Note the index number e.g. `[0]`.
+Note the number in brackets, e.g. `[0]`.
 
 ### Linux
 ```bash
@@ -98,9 +46,9 @@ v4l2-ctl --list-devices
 
 ---
 
-## Step 4 — Push Your Webcam to the Server
+## Step 3 — Push Your Webcam to the GPU
 
-Replace `<instance-ip>` with your vast.ai instance's public IP.
+Open a terminal and run the command for your OS. **Keep it running the whole time you use the app.**
 
 ### Windows
 ```powershell
@@ -109,6 +57,7 @@ ffmpeg -f dshow -i video="YOUR WEBCAM NAME HERE" `
   -pix_fmt yuv420p -b:v 2M -maxrate 2M -bufsize 4M `
   -f rtsp rtsp://77.48.24.250:48207/webcam
 ```
+Replace `YOUR WEBCAM NAME HERE` with the exact name from Step 2.
 
 ### macOS
 ```bash
@@ -117,6 +66,7 @@ ffmpeg -f avfoundation -framerate 30 -i "0" \
   -pix_fmt yuv420p -b:v 2M -maxrate 2M -bufsize 4M \
   -f rtsp rtsp://77.48.24.250:48207/webcam
 ```
+Replace `0` with your device index from Step 2.
 
 ### Linux
 ```bash
@@ -126,61 +76,44 @@ ffmpeg -f v4l2 -framerate 30 -i /dev/video0 \
   -f rtsp rtsp://77.48.24.250:48207/webcam
 ```
 
-Keep this terminal open — it must stay running while you use Deep-Live-Cam.
+When it's working you'll see output like:
+```
+frame=  42 fps= 30 q=28.0 size=    512kB time=00:00:01.40 bitrate=2994.3kbits/s
+```
 
 ---
 
-## Step 5 — Use the GUI
+## Step 4 — Open the GUI
 
-1. Open your browser and go to:
-   ```
-   http://77.48.24.250:48253/vnc.html
-   ```
-2. Click **Connect**
-3. The Deep-Live-Cam GUI will appear
-4. Click **Select Face** → pick a source face image
-5. Click the **Camera dropdown** and select **`/dev/video10`** (the virtual webcam)
-6. Click **Live** → face swap starts in real time
+Once the ffmpeg stream is running, open your browser and go to:
 
----
+```
+http://77.48.24.250:48253/vnc.html
+```
 
-## Latency Expectations
+Click **Connect** (no password). The Deep-Live-Cam window will appear.
 
-| Component | Added Latency |
-|---|---|
-| Local ffmpeg encode | ~50ms |
-| Internet upload to server | ~50–200ms (depends on your connection) |
-| RTSP server + bridge | ~50ms |
-| Deep-Live-Cam processing (GPU) | ~20–50ms per frame |
-| noVNC display | ~50–100ms |
-| **Total round-trip** | **~200–500ms** |
-
-This is not zero-latency but is totally usable for streaming/recording. For Zoom/OBS use, the latency is fine since it's one-way.
+1. Click **Select Face** → choose a face image from your machine (upload via the noVNC clipboard or use a pre-uploaded file)
+2. Click the **Camera dropdown** → select **`/dev/video10`**
+3. Click **Live** → real-time face swap starts
 
 ---
 
 ## Troubleshooting
 
-**`modprobe v4l2loopback` fails on boot**
-→ Make sure "Run as Privileged" is enabled in the vast.ai instance settings. Without it, kernel module loading is blocked.
+**ffmpeg exits immediately with `dshow` error (Windows)**
+→ The webcam name doesn't match exactly. Re-run Step 2 and copy it character-for-character.
 
-**Deep-Live-Cam doesn't show `/dev/video10` in the camera list**
-→ The virtual webcam only appears once a stream is actively being pushed. Start your local ffmpeg push first, then open the camera dropdown.
+**`/dev/video10` not in the camera list**
+→ The stream isn't reaching the server yet. Check your ffmpeg terminal — it should show frame output. Try restarting it.
 
 **Stream lags or stutters**
-→ Lower the bitrate on your local push:
-```bash
+→ Lower the bitrate:
+```powershell
+# replace -b:v 2M -maxrate 2M -bufsize 4M with:
 -b:v 1M -maxrate 1M -bufsize 2M
 ```
-Or add `-s 854x480` to downscale to 480p before sending.
+Or add `-s 854x480` to send 480p instead of full res.
 
-**ffmpeg bridge log**
-On the server, check `/tmp/ffmpeg-bridge.log` for errors:
-```bash
-tail -f /tmp/ffmpeg-bridge.log
-```
-
-**MediaMTX log**
-```bash
-tail -f /tmp/mediamtx.log
-```
+**GUI won't load**
+→ The server may still be setting up (first boot takes ~5–10 min). Wait, then refresh.
