@@ -148,7 +148,12 @@ elapsed
 
 # ── 6. Kill anything already on the GPU server port ──────────────────────────
 step "Clearing GPU server port"
+# Kill any previous gpu_server.py instance first
+pkill -f "gpu_server.py" 2>/dev/null || true
+# Then kill anything still holding the port
 fuser -k ${WEBUI_PORT}/tcp 2>/dev/null || true
+# Give the OS a moment to release the socket
+sleep 2
 ok "Port $WEBUI_PORT is free"
 elapsed
 
