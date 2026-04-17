@@ -166,8 +166,6 @@ pkill -9 -f "gpu_server.py" 2>/dev/null || true
 pkill -9 -f "uvicorn" 2>/dev/null || true
 sleep 1
 
-# Find the first free port from a candidate list.
-# If OPEN_BUTTON_PORT is set but occupied (e.g. taken by vast.ai itself), skip it.
 _try_bind() {
     python3 - <<EOF 2>/dev/null
 import socket
@@ -178,25 +176,42 @@ s.close()
 EOF
 }
 
+# Build the candidate list from VAST_TCP_PORT_* env vars — these are the ONLY
+# ports that have an external mapping (i.e. are actually reachable from outside).
+# Prefer OPEN_BUTTON_PORT first, then all other mapped ports, skip SSH (22).
+_mapped_ports=$(env | grep '^VAST_TCP_PORT_' | sed 's/VAST_TCP_PORT_\([0-9]*\)=.*/\1/' | grep -v '^22$' | sort -n)
+
 WEBUI_PORT=""
-# Prefer OPEN_BUTTON_PORT if set and actually free
-if [ -n "${OPEN_BUTTON_PORT:-}" ] && _try_bind "${OPEN_BUTTON_PORT}"; then
-    WEBUI_PORT=${OPEN_BUTTON_PORT}
-else
-    if [ -n "${OPEN_BUTTON_PORT:-}" ]; then
-        info "OPEN_BUTTON_PORT=${OPEN_BUTTON_PORT} is occupied — trying fallbacks"
+
+# 1. Try OPEN_BUTTON_PORT first (it's what the "Open" button uses)
+if [ -n "${OPEN_BUTTON_PORT:-}" ] && echo "$_mapped_ports" | grep -qx "${OPEN_BUTTON_PORT}"; then
+    if _try_bind "${OPEN_BUTTON_PORT}"; then
+        WEBUI_PORT=${OPEN_BUTTON_PORT}
+    else
+        info "OPEN_BUTTON_PORT=${OPEN_BUTTON_PORT} is occupied — trying other mapped ports"
     fi
-    # Try well-known ports first (so VAST_TCP_PORT_XXXX mapping is predictable)
-    for _p in 8080 8888 7860 6006 5000; do
-        if _try_bind $_p; then
+fi
+
+# 2. Try remaining mapped ports in order
+if [ -z "$WEBUI_PORT" ]; then
+    for _p in $_mapped_ports; do
+        [ "$_p" = "${OPEN_BUTTON_PORT:-}" ] && continue   # already tried
+        if _try_bind "$_p"; then
             WEBUI_PORT=$_p
             break
         fi
+        info "Port $_p occupied, skipping"
     done
-    # Absolute last resort: let OS pick any free port
-    if [ -z "$WEBUI_PORT" ]; then
-        WEBUI_PORT=$(_find_free_port)
-    fi
+fi
+
+# 3. Absolute last resort — OS picks a port (won't be externally reachable!)
+if [ -z "$WEBUI_PORT" ]; then
+    WEBUI_PORT=$(_find_free_port)
+    echo ""
+    echo "  ⚠  WARNING: all mapped ports are occupied."
+    echo "  ⚠  Falling back to port $WEBUI_PORT — NOT reachable externally."
+    echo "  ⚠  Add more open ports to your vast.ai template to fix this."
+    echo ""
 fi
 
 ok "Will bind on port $WEBUI_PORT"
