@@ -422,12 +422,16 @@ async def ws_live(ws: WebSocket):
     # Shared state between receive loop and processing thread
     latest_frame_lock = threading.Lock()
     latest_frame = [None]           # (mode, raw_bytes): mode='jpeg'|'h264'
-    out_q: queue.Queue = queue.Queue(maxsize=4)
+    # asyncio.Queue used as a lock-free bridge from the process thread to the
+    # async sender — avoids run_in_executor thread-pool exhaustion under rapid
+    # reconnects.
+    out_q: asyncio.Queue = asyncio.Queue(maxsize=4)
     stop = threading.Event()
 
     # ── Processing thread ──────────────────────────────────────────────────────
     def _process_loop():
         fps_procs  = get_frame_processors_modules(G.frame_processors)
+        last_fp_key = tuple(G.frame_processors)  # track changes to avoid needless reloads
         h264_dec   = _H264Decoder() if _HAS_AV else None
         src_img    = None
         last_src   = None
@@ -503,9 +507,11 @@ async def ws_live(ws: WebSocket):
                     )
                     _last_face_state = face_state
 
-            # Refresh processor modules periodically (picks up enhancer changes)
-            if det_count % 30 == 0:
+            # Reload processor modules only when the list actually changed
+            current_fp_key = tuple(G.frame_processors)
+            if current_fp_key != last_fp_key:
                 fps_procs = get_frame_processors_modules(G.frame_processors)
+                last_fp_key = current_fp_key
 
             for fp in fps_procs:
                 if fp.NAME == "DLC.FACE-SWAPPER":
@@ -540,16 +546,17 @@ async def ws_live(ws: WebSocket):
             ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok:
                 data = jpg.tobytes()
+                # Thread-safe put into the asyncio queue; drop oldest frame if full
                 try:
-                    out_q.put_nowait(data)
-                except queue.Full:
+                    loop.call_soon_threadsafe(out_q.put_nowait, data)
+                except asyncio.QueueFull:
                     try:
                         out_q.get_nowait()
-                    except queue.Empty:
+                    except asyncio.QueueEmpty:
                         pass
                     try:
-                        out_q.put_nowait(data)
-                    except queue.Full:
+                        loop.call_soon_threadsafe(out_q.put_nowait, data)
+                    except asyncio.QueueFull:
                         pass
 
     proc_t = threading.Thread(target=_process_loop, daemon=True)
@@ -559,11 +566,9 @@ async def ws_live(ws: WebSocket):
     async def _sender():
         while not stop.is_set():
             try:
-                data = await loop.run_in_executor(
-                    None, lambda: out_q.get(timeout=0.1)
-                )
+                data = await asyncio.wait_for(out_q.get(), timeout=0.1)
                 await ws.send_bytes(data)
-            except queue.Empty:
+            except asyncio.TimeoutError:
                 continue
             except Exception:
                 break
