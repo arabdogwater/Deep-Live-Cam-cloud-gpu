@@ -541,4 +541,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print(f"\n[GPU] Server ready → http://0.0.0.0:{args.port}/\n")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", reuse_port=True)
