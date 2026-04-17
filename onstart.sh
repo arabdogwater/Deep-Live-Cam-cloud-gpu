@@ -167,9 +167,22 @@ pkill -f "gpu_server.py" 2>/dev/null || true
 if [ -z "${OPEN_BUTTON_PORT:-}" ]; then
     WEBUI_PORT=$(_find_free_port)
 fi
-# Kill anything still holding our port (e.g. lingering socket in TIME_WAIT)
+# Kill anything still holding our port, then wait until it's actually free
 fuser -k "${WEBUI_PORT}/tcp" 2>/dev/null || true
-sleep 1
+_port_free=0
+for _i in $(seq 1 15); do
+    if ! ss -tlnp 2>/dev/null | grep -q ":${WEBUI_PORT} \|:${WEBUI_PORT}$"; then
+        _port_free=1
+        break
+    fi
+    info "Port ${WEBUI_PORT} still busy (${_i}s)…"
+    sleep 1
+done
+if [ $_port_free -eq 0 ]; then
+    # Last resort: pick a different free port
+    WEBUI_PORT=$(_find_free_port)
+    info "Switched to free port $WEBUI_PORT"
+fi
 ok "Will bind on port $WEBUI_PORT"
 elapsed
 
