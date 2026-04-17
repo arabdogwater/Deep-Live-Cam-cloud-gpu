@@ -164,6 +164,10 @@ elapsed
 step "Stopping any previous gpu_server.py instance"
 pkill -9 -f "gpu_server.py" 2>/dev/null || true
 pkill -9 -f "uvicorn" 2>/dev/null || true
+# vast.ai starts Jupyter on 8080 and TensorBoard on 6006 by default.
+# Kill them so we can claim a mapped port.
+pkill -9 -f "jupyter" 2>/dev/null || true
+pkill -9 -f "tensorboard" 2>/dev/null || true
 sleep 1
 
 _try_bind() {
