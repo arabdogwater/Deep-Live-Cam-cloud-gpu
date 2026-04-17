@@ -33,6 +33,19 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         pass  # keep console clean
 
 
+class _Server(socketserver.ThreadingTCPServer):
+    """Threaded localhost server that ignores normal browser disconnect noise."""
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        etype, exc, _ = sys.exc_info()
+        if isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def main():
     port = PORT
     for i, arg in enumerate(sys.argv[1:], 1):
@@ -45,9 +58,7 @@ def main():
         except ValueError:
             continue
 
-    socketserver.TCPServer.allow_reuse_address = True
-
-    with socketserver.TCPServer(("127.0.0.1", port), _Handler) as httpd:
+    with _Server(("127.0.0.1", port), _Handler) as httpd:
         url = f"http://localhost:{port}/"
         print()
         print("  ╔═══════════════════════════════════════════════════╗")
