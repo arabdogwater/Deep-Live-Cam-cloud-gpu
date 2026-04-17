@@ -151,13 +151,14 @@ def _run_vcam_once(width: int, height: int, fps: int, device=None) -> None:
 
     kw: dict = dict(width=width, height=height, fps=fps, fmt=pyvirtualcam.PixelFormat.RGB)
     if device:
-        kw["device"] = device
+        kw["device"] = device.strip()
 
     try:
         with pyvirtualcam.Camera(**kw) as cam:
-            print(f"  [vcam] Active: {cam.device}  ({width}x{height} @ {fps}fps)")
+            active_name = cam.device.strip()
+            print(f"  [vcam] Active: {active_name}  ({width}x{height} @ {fps}fps)")
             with _vcam_cfg_lock:
-                _vcam_cfg["_active_device"] = cam.device
+                _vcam_cfg["_active_device"] = active_name
 
             while not _vcam_restart_event.is_set():
                 with _vcam_state_lock:
@@ -264,7 +265,7 @@ async def post_vcam(req: Request):
                     _vcam_cfg[key] = new_val
                     changed = True
         if "device" in body:
-            new_device = body["device"] or ""
+            new_device = (body["device"] or "").strip()
             if _vcam_cfg["device"] != new_device:
                 _vcam_cfg["device"] = new_device
                 changed = True
@@ -291,7 +292,7 @@ def list_vcam_devices():
     try:
         from pygrabber.dshow_graph import FilterGraph
         names = FilterGraph().get_input_devices()
-        devices = [{"name": n} for n in names]
+        devices = [{"name": n.strip()} for n in names]
     except Exception:
         # Fallback: probe by index with cv2
         for i in range(8):
