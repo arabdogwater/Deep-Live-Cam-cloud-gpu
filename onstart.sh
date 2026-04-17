@@ -3,8 +3,8 @@ set -e
 
 # ─── Deep-Live-Cam – vast.ai onstart script ───────────────────────────────────
 # Designed for: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
-# GUI in browser: open the port you set as OPEN_BUTTON_PORT (default 8080)
-# Ports to open in your vast.ai template: 8080 (GPU Server)
+# Port: uses OPEN_BUTTON_PORT if set in the vast.ai template, otherwise picks
+#       a free port automatically. Never kills unrelated processes.
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ── Port config (driven by vast.ai env vars) ─────────────────────────────────
@@ -13,9 +13,22 @@ set -e
 #   VAST_TCP_PORT_XXXX  — external (host-side) port mapped to internal port XXXX
 #   PUBLIC_IPADDR       — public IP of the instance
 #
-# In your vast.ai template, add open port: 8080 (GPU Server).
-# Set OPEN_BUTTON_PORT=8080 as the primary port in the template.
-WEBUI_PORT=${OPEN_BUTTON_PORT:-8080}   # internal port the GPU server binds on
+# If OPEN_BUTTON_PORT is set (vast.ai template), use it.
+# Otherwise find a free port automatically — never steal an occupied one.
+_find_free_port() {
+    python3 -c "
+import socket
+s = socket.socket()
+s.bind(('', 0))
+print(s.getsockname()[1])
+s.close()
+"
+}
+if [ -n "${OPEN_BUTTON_PORT:-}" ]; then
+    WEBUI_PORT=${OPEN_BUTTON_PORT}
+else
+    WEBUI_PORT=$(_find_free_port)
+fi
 INSTANCE_IP=${PUBLIC_IPADDR:-$(hostname -I | awk '{print $1}')}
 
 REPO_URL="https://github.com/arabdogwater/Deep-Live-Cam-cloud-gpu"
@@ -146,15 +159,18 @@ else
 fi
 elapsed
 
-# ── 6. Kill anything already on the GPU server port ──────────────────────────
-step "Clearing GPU server port"
-# Kill any previous gpu_server.py instance first
+# ── 6. Kill any previous instance of THIS script's server ───────────────────
+step "Stopping any previous gpu_server.py instance"
 pkill -f "gpu_server.py" 2>/dev/null || true
-# Then kill anything still holding the port
-fuser -k ${WEBUI_PORT}/tcp 2>/dev/null || true
-# Give the OS a moment to release the socket
-sleep 2
-ok "Port $WEBUI_PORT is free"
+# If OPEN_BUTTON_PORT was specified, we own that port — wait for it to free
+if [ -n "${OPEN_BUTTON_PORT:-}" ]; then
+    sleep 2
+fi
+# Refresh free port selection now that old process is gone
+if [ -z "${OPEN_BUTTON_PORT:-}" ]; then
+    WEBUI_PORT=$(_find_free_port)
+fi
+ok "Will bind on port $WEBUI_PORT"
 elapsed
 
 # ── 7. Launch Deep-Live-Cam GPU server ────────────────────────────────────────
