@@ -1021,8 +1021,10 @@ async function startLive() {
 
   try {
     // Open WebSocket to GPU
-    const wsUrl = gpuUrl.replace(/^http/, 'ws') + '/ws';
-    uiLog.push('Starting live stream to ' + wsUrl, 'info');
+    // Route through local proxy so face-swapped frames can reach the virtual camera
+    const gpuWsUrl = gpuUrl.replace(/^http/, 'ws') + '/ws';
+    const wsUrl = `ws://${location.hostname}:${location.port || 8080}/proxy?url=${encodeURIComponent(gpuWsUrl)}`;
+    uiLog.push('Starting live stream via local proxy → ' + gpuWsUrl, 'info');
     ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
 
