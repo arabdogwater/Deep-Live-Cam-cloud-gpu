@@ -679,6 +679,8 @@ document.getElementById('dbg-header').addEventListener('click', () => {
   btn.textContent = dbg._expanded ? '▲' : '▼';
 });
 
+const $ = id => document.getElementById(id);
+
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
 let gpuUrl   = '';        // e.g. "http://123.45.67.89:8080"
