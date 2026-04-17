@@ -33,8 +33,15 @@ class _H264Decoder:
     """Decode raw H.264 annexb chunks produced by browser WebCodecs VideoEncoder."""
     def __init__(self):
         self._codec = _pyav.CodecContext.create('h264', 'r')
+        self._got_keyframe = False
 
-    def decode(self, data: bytes) -> Optional[np.ndarray]:
+    def decode(self, data: bytes, is_keyframe: bool = False) -> Optional[np.ndarray]:
+        if is_keyframe:
+            self._got_keyframe = True
+        if not self._got_keyframe:
+            # Drop delta frames that arrive before the first keyframe — they
+            # would produce garbled output and desync the decoder state.
+            return None
         try:
             pkt = _pyav.Packet(data)
             for f in self._codec.decode(pkt):
@@ -371,7 +378,7 @@ async def ws_live(ws: WebSocket):
                 time.sleep(0.003)
                 continue
 
-            mode, raw = item
+            mode, raw, is_kf = item
 
             if mode == 'jpeg':
                 nparr = np.frombuffer(raw, np.uint8)
@@ -381,7 +388,7 @@ async def ws_live(ws: WebSocket):
             elif mode == 'h264':
                 if h264_dec is None:
                     continue
-                frame = h264_dec.decode(raw)
+                frame = h264_dec.decode(raw, is_keyframe=is_kf)
                 if frame is None:
                     continue
             else:
@@ -485,10 +492,10 @@ async def ws_live(ws: WebSocket):
                     payload = data[1:]
                     if ftype == 0x00:
                         with latest_frame_lock:
-                            latest_frame[0] = ('jpeg', payload)
+                            latest_frame[0] = ('jpeg', payload, False)
                     elif ftype in (0x01, 0x02):
                         with latest_frame_lock:
-                            latest_frame[0] = ('h264', payload)
+                            latest_frame[0] = ('h264', payload, ftype == 0x01)
 
             elif "text" in msg and msg["text"]:
                 data = json.loads(msg["text"])
