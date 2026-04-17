@@ -162,16 +162,19 @@ elapsed
 
 # ── 6. Kill any previous instance of THIS script's server ───────────────────
 step "Stopping any previous gpu_server.py instance"
-pkill -f "gpu_server.py" 2>/dev/null || true
+# SIGKILL — kernel closes the fd immediately, no cleanup delay
+pkill -9 -f "gpu_server.py" 2>/dev/null || true
+# Also kill anything else that owns our port right now
+fuser -k "${WEBUI_PORT}/tcp" 2>/dev/null || true
 # Refresh free port selection now that old process is gone
 if [ -z "${OPEN_BUTTON_PORT:-}" ]; then
     WEBUI_PORT=$(_find_free_port)
 fi
-# Kill anything still holding our port, then wait until it's actually free
-fuser -k "${WEBUI_PORT}/tcp" 2>/dev/null || true
+# Poll (all states, not just LISTEN) until the port is genuinely free
 _port_free=0
-for _i in $(seq 1 15); do
-    if ! ss -tlnp 2>/dev/null | grep -q ":${WEBUI_PORT} \|:${WEBUI_PORT}$"; then
+for _i in $(seq 1 20); do
+    # ss -anp: all states; grep local address ending in :PORT
+    if ! ss -anp 2>/dev/null | grep -qE "[ \t]:${WEBUI_PORT}[ \t]"; then
         _port_free=1
         break
     fi
@@ -179,7 +182,7 @@ for _i in $(seq 1 15); do
     sleep 1
 done
 if [ $_port_free -eq 0 ]; then
-    # Last resort: pick a different free port
+    # Last resort: pick a brand-new free port
     WEBUI_PORT=$(_find_free_port)
     info "Switched to free port $WEBUI_PORT"
 fi
