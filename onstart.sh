@@ -162,36 +162,43 @@ elapsed
 
 # ── 6. Kill any previous instance of THIS script's server ───────────────────
 step "Stopping any previous gpu_server.py instance"
-# SIGKILL all gpu_server.py and uvicorn processes holding our port
 pkill -9 -f "gpu_server.py" 2>/dev/null || true
 pkill -9 -f "uvicorn" 2>/dev/null || true
-fuser -k "${WEBUI_PORT}/tcp" 2>/dev/null || true
-# Refresh free port selection now that old process is gone
-if [ -z "${OPEN_BUTTON_PORT:-}" ]; then
-    WEBUI_PORT=$(_find_free_port)
-fi
-# Poll by actually trying to bind — the only reliable check
-_port_free=0
-for _i in $(seq 1 20); do
-    if python3 - <<EOF 2>/dev/null
+sleep 1
+
+# Find the first free port from a candidate list.
+# If OPEN_BUTTON_PORT is set but occupied (e.g. taken by vast.ai itself), skip it.
+_try_bind() {
+    python3 - <<EOF 2>/dev/null
 import socket
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(('', ${WEBUI_PORT}))
+s.bind(('', $1))
 s.close()
 EOF
-    then
-        _port_free=1
-        break
+}
+
+WEBUI_PORT=""
+# Prefer OPEN_BUTTON_PORT if set and actually free
+if [ -n "${OPEN_BUTTON_PORT:-}" ] && _try_bind "${OPEN_BUTTON_PORT}"; then
+    WEBUI_PORT=${OPEN_BUTTON_PORT}
+else
+    if [ -n "${OPEN_BUTTON_PORT:-}" ]; then
+        info "OPEN_BUTTON_PORT=${OPEN_BUTTON_PORT} is occupied — trying fallbacks"
     fi
-    info "Port ${WEBUI_PORT} still busy (${_i}s)…"
-    fuser -k "${WEBUI_PORT}/tcp" 2>/dev/null || true
-    sleep 1
-done
-if [ $_port_free -eq 0 ]; then
-    WEBUI_PORT=$(_find_free_port)
-    info "Switched to free port $WEBUI_PORT"
+    # Try well-known ports first (so VAST_TCP_PORT_XXXX mapping is predictable)
+    for _p in 8080 8888 7860 6006 5000; do
+        if _try_bind $_p; then
+            WEBUI_PORT=$_p
+            break
+        fi
+    done
+    # Absolute last resort: let OS pick any free port
+    if [ -z "$WEBUI_PORT" ]; then
+        WEBUI_PORT=$(_find_free_port)
+    fi
 fi
+
 ok "Will bind on port $WEBUI_PORT"
 elapsed
 
