@@ -287,20 +287,27 @@ async def post_vcam(req: Request):
 
 @app.get("/api/vcam/devices")
 def list_vcam_devices():
-    """Enumerate available video devices (virtual cameras appear here too)."""
-    devices = []
-    try:
-        from pygrabber.dshow_graph import FilterGraph
-        names = FilterGraph().get_input_devices()
-        devices = [{"name": n.strip()} for n in names]
-    except Exception:
-        # Fallback: probe by index with cv2
-        for i in range(8):
-            backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
-            cap = cv2.VideoCapture(i, backend)
-            if cap.isOpened():
-                devices.append({"name": f"Camera {i}"})
-                cap.release()
+    """
+    Return only pyvirtualcam-compatible virtual camera device names.
+    We do NOT enumerate DirectShow devices — those include real webcams
+    that pyvirtualcam cannot use, which causes the 'unsupported device' error.
+    Instead we return the name that pyvirtualcam itself confirmed when it
+    opened successfully (stored in _active_device), plus the known OBS name.
+    """
+    seen: list[str] = []
+
+    # Highest priority: device name pyvirtualcam already opened successfully
+    with _vcam_cfg_lock:
+        active = _vcam_cfg.get("_active_device")
+    if active:
+        seen.append(active)
+
+    # Always include the canonical OBS name if not already present
+    obs_name = "OBS Virtual Camera"
+    if obs_name not in seen:
+        seen.append(obs_name)
+
+    devices = [{"name": n} for n in seen]
     return JSONResponse({"devices": devices, "has_vcam": _HAS_VCAM})
 
 
