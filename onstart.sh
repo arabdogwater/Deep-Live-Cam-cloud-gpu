@@ -72,7 +72,8 @@ apt-get install -y --no-install-recommends \
     libxrender1 \
     libxext6 \
     libgl1 \
-    wget 2>&1 | grep -E "^(Get|Unpacking|Setting up|Processing)" | sed 's/^/  | /' || true
+    wget \
+    psmisc 2>&1 | grep -E "^(Get|Unpacking|Setting up|Processing)" | sed 's/^/  | /' || true
 ok "System packages ready"
 elapsed
 
