@@ -434,6 +434,47 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; backgro
   </button>
   <p id="golive-hint" style="font-size:11px;color:var(--muted);text-align:center;margin-top:-4px;">Upload a face to enable</p>
 
+  <!-- Virtual Camera -->
+  <div class="card" style="padding:12px;" id="vcam-card">
+    <button class="accordion-btn" id="vcam-acc-btn">
+      <span style="display:flex;align-items:center;gap:7px;">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        Virtual Camera
+      </span>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+    </button>
+    <div class="accordion-body" id="vcam-acc-body">
+      <div class="acc-inner">
+        <label class="tog">
+          <span class="label">Enable virtual camera</span>
+          <input type="checkbox" id="vcam-enabled" checked>
+          <span class="tog-track"></span>
+        </label>
+        <div id="vcam-device-row" style="font-size:11px;color:var(--muted);padding:2px 0;">Device: <span id="vcam-device-name" style="color:var(--green);">—</span></div>
+        <div class="divider"></div>
+        <div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:5px;">Resolution</div>
+          <select id="vcam-res" style="width:100%;">
+            <option value="1920x1080">1920 × 1080 (Full HD)</option>
+            <option value="1280x720" selected>1280 × 720 (HD)</option>
+            <option value="854x480">854 × 480 (480p)</option>
+            <option value="640x360">640 × 360 (360p)</option>
+          </select>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:5px;">Frame rate</div>
+          <select id="vcam-fps" style="width:100%;">
+            <option value="60">60 fps</option>
+            <option value="30" selected>30 fps</option>
+            <option value="24">24 fps</option>
+            <option value="15">15 fps</option>
+          </select>
+        </div>
+        <div id="vcam-status-msg" style="font-size:11px;color:var(--muted);"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings -->
   <div class="card" style="padding:12px;">
     <button class="accordion-btn" id="acc-btn">
@@ -849,6 +890,7 @@ function enterApp() {
 // ═══════════════════ MAIN APP INIT ═══════════════════════════════════
 async function initApp() {
   await loadSettings();
+  await loadVcamSettings();
   await initCamera();
   poll();
   setInterval(poll, 2000);
@@ -1309,6 +1351,55 @@ async function loadSettings() {
     else if (s.face_enhancer_gpen256) $('sel-enhancer').value = 'face_enhancer_gpen256';
   } catch(e) {}
 }
+
+// ═══════════════════ VIRTUAL CAMERA ════════════════════════════════
+async function loadVcamSettings() {
+  try {
+    const s = await fetch('/api/vcam').then(r => r.json());
+    $('vcam-enabled').checked = !!s.enabled;
+    $('vcam-res').value = s.width + 'x' + s.height;
+    $('vcam-fps').value = String(s.fps);
+    const msg = s.enabled
+      ? (s.width + 'x' + s.height + ' @ ' + s.fps + 'fps')
+      : 'Virtual camera disabled';
+    $('vcam-status-msg').textContent = msg;
+    $('vcam-status-msg').style.color = s.enabled ? 'var(--green)' : 'var(--muted)';
+  } catch(e) {
+    $('vcam-status-msg').textContent = 'local.py not running as local server';
+    $('vcam-status-msg').style.color = 'var(--muted)';
+  }
+}
+
+async function pushVcamSettings() {
+  const [w, h] = $('vcam-res').value.split('x').map(Number);
+  const fps    = parseInt($('vcam-fps').value);
+  const enabled = $('vcam-enabled').checked;
+  $('vcam-status-msg').textContent = 'Applying...';
+  $('vcam-status-msg').style.color = 'var(--amber)';
+  try {
+    const r = await fetch('/api/vcam', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ width: w, height: h, fps, enabled }),
+    }).then(r => r.json());
+    const msg = r.enabled
+      ? (r.width + 'x' + r.height + ' @ ' + r.fps + 'fps — restarting...')
+      : 'Virtual camera disabled';
+    $('vcam-status-msg').textContent = msg;
+    $('vcam-status-msg').style.color = r.enabled ? 'var(--green)' : 'var(--muted)';
+  } catch(e) {
+    $('vcam-status-msg').textContent = 'Failed to apply — is local.py running?';
+    $('vcam-status-msg').style.color = 'var(--red)';
+  }
+}
+
+$('vcam-acc-btn').addEventListener('click', () => {
+  const open = $('vcam-acc-body').classList.toggle('open');
+  $('vcam-acc-btn').classList.toggle('open', open);
+});
+$('vcam-enabled').addEventListener('change', pushVcamSettings);
+$('vcam-res').addEventListener('change', pushVcamSettings);
+$('vcam-fps').addEventListener('change', pushVcamSettings);
 
 // ═══════════════════ ACCORDION ═══════════════════════════════════════
 $('acc-btn').addEventListener('click', () => {
