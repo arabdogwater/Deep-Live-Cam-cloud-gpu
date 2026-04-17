@@ -546,7 +546,7 @@ const dbg = {
   totalSent: 0, totalRecv: 0,
   // Internals
   _pingTimer: null, _tickTimer: null,
-  _lastFrameSentAt: null, _pingTs: null,
+  _sendTs: null, _pingTs: null,
   _expanded: true,
 
   _dv(id) { return document.getElementById(id); },
@@ -581,15 +581,18 @@ const dbg = {
   onFrameSent() {
     this._fsSince++;
     this.totalSent++;
-    this._lastFrameSentAt = performance.now();
+    // Track a rolling window of send timestamps to compute true frame RTT
+    this._sendTs = performance.now();
   },
 
   // Called every time we receive a processed frame
   onFrameReceived() {
     this._frSince++;
     this.totalRecv++;
-    if (this._lastFrameSentAt !== null) {
-      this.frameRtt = Math.round(performance.now() - this._lastFrameSentAt);
+    if (this._sendTs !== null) {
+      // Time from last frame we sent to the response arriving back.
+      // At 30fps send rate this is a meaningful round-trip estimate.
+      this.frameRtt = Math.round(performance.now() - this._sendTs);
     }
   },
 
@@ -789,7 +792,7 @@ async function initCamera() {
   try {
     // Request camera permission with default device first
     localStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 }, facingMode: 'user' },
       audio: false,
     });
     videoEl.srcObject = localStream;
@@ -831,7 +834,7 @@ async function switchCamera(deviceId) {
   try {
     // Acquire new stream BEFORE stopping the old one — avoids a gap with no stream
     const newStream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
       audio: false,
     });
     if (localStream) localStream.getTracks().forEach(t => t.stop());
@@ -999,7 +1002,7 @@ async function startLive() {
           outputCanvas.height = bmp.height;
           outputCtx.drawImage(bmp, 0, 0);
           bmp.close();
-        });
+        }).catch(() => { /* corrupt JPEG from server */ });
       } else if (typeof event.data === 'string') {
         const msg = JSON.parse(event.data);
         if (msg.type === 'pong') { dbg.onPong(msg.ts); }
@@ -1107,19 +1110,27 @@ async function startFrameCapture() {
 
       let fcount = 0;
       let _encodeStart = 0;
+      const _minFrameInterval = 1000 / SEND_FPS; // ms between frames
+      let _lastEncodeTime = 0;
       (async () => {
         while (isLive) {
           let result;
           try { result = await _frameReader.read(); } catch(e) { break; }
           if (result.done || !result.value) break;
           const vf = result.value;
+          const now = performance.now();
+          // Skip frames that arrive faster than SEND_FPS
+          if (now - _lastEncodeTime < _minFrameInterval) {
+            vf.close();
+            continue;
+          }
           if (_encoder?.state === 'configured') {
-            // Keyframe every 2 s so the server can always re-sync
-            _encodeStart = performance.now();
+            _encodeStart = now;
+            _lastEncodeTime = now;
             _encoder.encode(vf, { keyFrame: fcount % (SEND_FPS * 2) === 0 });
+            fcount++;
           }
           vf.close();
-          fcount++;
         }
       })();
       dbg.setMode('H264');

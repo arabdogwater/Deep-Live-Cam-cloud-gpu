@@ -16,6 +16,8 @@ import socketserver
 import webbrowser
 import os
 import sys
+import threading
+import signal
 
 PORT = 8080
 DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -56,12 +58,16 @@ def main():
         print("  ╚═══════════════════════════════════════════════════╝")
         print()
 
-        webbrowser.open(url)
+        threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
 
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
+        def _shutdown(sig, frame):
             print("\n  Shutting down.")
+            threading.Thread(target=httpd.shutdown, daemon=True).start()
+
+        signal.signal(signal.SIGINT,  _shutdown)
+        signal.signal(signal.SIGTERM, _shutdown)
+
+        httpd.serve_forever()
 
 
 if __name__ == "__main__":

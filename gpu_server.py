@@ -33,21 +33,29 @@ class _H264Decoder:
     """Decode raw H.264 annexb chunks produced by browser WebCodecs VideoEncoder."""
     def __init__(self):
         self._codec = _pyav.CodecContext.create('h264', 'r')
+        self._codec.thread_type = 'AUTO'
         self._got_keyframe = False
+        self._err_count = 0
+        self._ok_count  = 0
 
     def decode(self, data: bytes, is_keyframe: bool = False) -> Optional[np.ndarray]:
         if is_keyframe:
             self._got_keyframe = True
+            # Reset decoder on keyframes to clear any corrupt state
+            self._codec = _pyav.CodecContext.create('h264', 'r')
+            self._codec.thread_type = 'AUTO'
         if not self._got_keyframe:
-            # Drop delta frames that arrive before the first keyframe — they
-            # would produce garbled output and desync the decoder state.
             return None
         try:
             pkt = _pyav.Packet(data)
             for f in self._codec.decode(pkt):
+                self._ok_count += 1
                 return f.to_ndarray(format='bgr24')
-        except Exception:
-            pass
+        except Exception as e:
+            self._err_count += 1
+            if self._err_count <= 5 or self._err_count % 100 == 0:
+                print(f"[GPU] H264 decode error #{self._err_count} "
+                      f"(ok={self._ok_count}): {e}")
         return None
 
 # ── Stub tkinter-dependent modules BEFORE any project code imports them ────────
@@ -354,7 +362,7 @@ async def ws_live(ws: WebSocket):
     # Shared state between receive loop and processing thread
     latest_frame_lock = threading.Lock()
     latest_frame = [None]           # (mode, raw_bytes): mode='jpeg'|'h264'
-    out_q: queue.Queue = queue.Queue(maxsize=2)
+    out_q: queue.Queue = queue.Queue(maxsize=4)
     stop = threading.Event()
 
     # ── Processing thread ──────────────────────────────────────────────────────
@@ -365,9 +373,9 @@ async def ws_live(ws: WebSocket):
         last_src   = None
         cached_face = None
         det_count  = 0
-        prev_time  = time.time()
-        frame_count = 0
-        fps_display = 0.0
+        _proc_count = 0
+        _decode_fail = 0
+        _log_time  = time.time()
 
         while not stop.is_set():
             with latest_frame_lock:
@@ -384,12 +392,14 @@ async def ws_live(ws: WebSocket):
                 nparr = np.frombuffer(raw, np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 if frame is None:
+                    _decode_fail += 1
                     continue
             elif mode == 'h264':
                 if h264_dec is None:
                     continue
                 frame = h264_dec.decode(raw, is_keyframe=is_kf)
                 if frame is None:
+                    _decode_fail += 1
                     continue
             else:
                 continue
@@ -404,11 +414,15 @@ async def ws_live(ws: WebSocket):
                 src_img = get_one_face(img) if img is not None else None
 
             det_count += 1
-            if det_count % 3 == 0:
-                cached_face = (
+            # Detect on first frame, then every 3rd frame thereafter.
+            # Preserve cached_face when detection returns nothing.
+            if cached_face is None or det_count % 3 == 0:
+                result = (
                     get_many_faces(frame) if G.many_faces
                     else get_one_face(frame)
                 )
+                if result is not None:
+                    cached_face = result
 
             # Refresh processor modules periodically (picks up enhancer changes)
             if det_count % 30 == 0:
@@ -430,19 +444,20 @@ async def ws_live(ws: WebSocket):
                 elif fp.NAME == "DLC.FACE-ENHANCER-GPEN512" and G.fp_ui.get("face_enhancer_gpen512"):
                     frame = fp.process_frame(None, frame)
 
-            if G.show_fps:
-                frame_count += 1
-                now = time.time()
-                if now - prev_time >= 1.0:
-                    fps_display = frame_count / (now - prev_time)
-                    frame_count = 0
-                    prev_time = now
-                cv2.putText(
-                    frame, f"FPS: {fps_display:.1f}",
-                    (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 60), 2,
-                )
+            _proc_count += 1
+            now = time.time()
+            if now - _log_time >= 5.0:
+                dt = now - _log_time
+                fps = _proc_count / dt
+                print(f"[GPU] Live: {fps:.1f} fps out | "
+                      f"decode_fail={_decode_fail} | "
+                      f"src={'yes' if src_img is not None else 'NO'} | "
+                      f"face={'yes' if cached_face is not None else 'NO'}")
+                _proc_count = 0
+                _decode_fail = 0
+                _log_time = now
 
-            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok:
                 data = jpg.tobytes()
                 try:
