@@ -115,6 +115,59 @@ _vcam_connected  = False    # True while browser vcam-feed WS is open
 # ── Signal to restart the vcam thread when settings change ──────────────────────
 _vcam_restart_event = threading.Event()
 
+# ── Backend probe — populated once at startup in a daemon thread ─────────────────
+# Maps exact device name → pyvirtualcam backend string
+_VCAM_PROBE_LOCK = threading.Lock()
+_VCAM_DEVICE_MAP: dict = {}   # {"OBS Virtual Camera": "obs", "Unity Video Capture": "unitycapture", ...}
+_VCAM_PROBE_DONE = threading.Event()
+
+
+def _probe_vcam_backends() -> None:
+    """
+    Open each known pyvirtualcam backend with a 2×2 dummy camera to discover
+    which virtual camera drivers are installed and what their exact device names
+    are.  Results are stored in _VCAM_DEVICE_MAP so _run_vcam_once can pass the
+    right backend= argument when the user picks a specific device.
+    """
+    if not _HAS_VCAM:
+        _VCAM_PROBE_DONE.set()
+        return
+
+    dummy = np.zeros((2, 2, 3), dtype=np.uint8)
+    backends = ["obs", "unitycapture"]
+
+    # pyvirtualcam ≥ 0.12 on Windows 11 22H2+ exposes a mediafoundation backend
+    try:
+        import pyvirtualcam as _pvc
+        if hasattr(_pvc, "Backend") and hasattr(_pvc.Backend, "MEDIAFOUNDATION"):
+            backends.append("mediafoundation")
+    except Exception:
+        pass
+
+    found: dict = {}
+    for backend in backends:
+        try:
+            with pyvirtualcam.Camera(
+                width=2, height=2, fps=1,
+                fmt=pyvirtualcam.PixelFormat.RGB,
+                backend=backend,
+            ) as cam:
+                name = cam.device.strip()
+                if name and name not in found:
+                    found[name] = backend
+        except Exception:
+            pass
+
+    with _VCAM_PROBE_LOCK:
+        _VCAM_DEVICE_MAP.update(found)
+
+    if found:
+        print(f"  [vcam] Detected virtual cameras: {list(found.keys())}")
+    else:
+        print("  [vcam] No virtual camera driver found. Install OBS Studio: https://obsproject.com")
+
+    _VCAM_PROBE_DONE.set()
+
 
 def _push_vcam_frame(bgr: np.ndarray) -> None:
     global _vcam_frame_rgb, _vcam_frame_ts
@@ -151,7 +204,13 @@ def _run_vcam_once(width: int, height: int, fps: int, device=None) -> None:
 
     kw: dict = dict(width=width, height=height, fps=fps, fmt=pyvirtualcam.PixelFormat.RGB)
     if device:
-        kw["device"] = device.strip()
+        device = device.strip()
+        kw["device"] = device
+        # Look up which backend owns this device so pyvirtualcam doesn't reject it
+        with _VCAM_PROBE_LOCK:
+            backend = _VCAM_DEVICE_MAP.get(device)
+        if backend:
+            kw["backend"] = backend
 
     try:
         with pyvirtualcam.Camera(**kw) as cam:
@@ -288,26 +347,19 @@ async def post_vcam(req: Request):
 @app.get("/api/vcam/devices")
 def list_vcam_devices():
     """
-    Return only pyvirtualcam-compatible virtual camera device names.
-    We do NOT enumerate DirectShow devices — those include real webcams
-    that pyvirtualcam cannot use, which causes the 'unsupported device' error.
-    Instead we return the name that pyvirtualcam itself confirmed when it
-    opened successfully (stored in _active_device), plus the known OBS name.
+    Return all virtual camera devices discovered by the backend probe.
+    Each entry includes the device name AND the backend that owns it,
+    so the UI can show exactly which virtual cam drivers are installed.
     """
-    seen: list[str] = []
+    with _VCAM_PROBE_LOCK:
+        probed = dict(_VCAM_DEVICE_MAP)
 
-    # Highest priority: device name pyvirtualcam already opened successfully
-    with _vcam_cfg_lock:
-        active = _vcam_cfg.get("_active_device")
-    if active:
-        seen.append(active)
+    if probed:
+        devices = [{"name": name, "backend": backend} for name, backend in probed.items()]
+    else:
+        # Probe still running or nothing found — return a safe default
+        devices = [{"name": "OBS Virtual Camera", "backend": "obs"}]
 
-    # Always include the canonical OBS name if not already present
-    obs_name = "OBS Virtual Camera"
-    if obs_name not in seen:
-        seen.append(obs_name)
-
-    devices = [{"name": n} for n in seen]
     return JSONResponse({"devices": devices, "has_vcam": _HAS_VCAM})
 
 
@@ -355,6 +407,8 @@ def main() -> None:
         print(f"  [warn] Port {args.port} in use — using {port} instead")
     args.port = port
 
+    # Probe installed virtual camera backends before starting the supervisor
+    threading.Thread(target=_probe_vcam_backends, daemon=True).start()
     threading.Thread(target=_vcam_supervisor, daemon=True).start()
 
     url = f"http://localhost:{args.port}/"
