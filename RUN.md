@@ -12,14 +12,23 @@ Opens `http://localhost:8080` in your browser automatically.
 
 ## Cloud GPU (vast.ai)
 
-Paste `onstart.sh` contents into the **On-start Script** field when creating your instance.
+### Option A — Automatic (recommended)
+Paste the contents of `onstart.sh` into the **On-start Script** field when creating your instance. Set **Open Port** to `8080`. The server starts automatically on boot.
 
-Set **Open Port** to `8080`.
+### Option B — Manual (run in the GPU terminal)
 
-Once the instance is running, click **Open** in the vast.ai UI — or connect manually:
+```bash
+curl -fsSL https://raw.githubusercontent.com/arabdogwater/Deep-Live-Cam-cloud-gpu/main/onstart.sh | bash
+```
+
+This clones the repo, installs dependencies, downloads models, and starts the server.
+
+---
+
+Once running, your GPU address is:
 
 ```
 http://<PUBLIC_IPADDR>:8080
 ```
 
-The server starts automatically. Enter that address in the browser connect screen on your local machine.
+Enter that in the browser connect screen on your local machine.
