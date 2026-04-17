@@ -450,8 +450,14 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; backgro
           <input type="checkbox" id="vcam-enabled" checked>
           <span class="tog-track"></span>
         </label>
-        <div id="vcam-device-row" style="font-size:11px;color:var(--muted);padding:2px 0;">Device: <span id="vcam-device-name" style="color:var(--green);">—</span></div>
+        <div style="font-size:11px;color:var(--muted);padding:2px 0;">Active: <span id="vcam-active-name" style="color:var(--green);">—</span></div>
         <div class="divider"></div>
+        <div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:5px;">Output device</div>
+          <select id="vcam-device" style="width:100%;">
+            <option value="">Auto-detect</option>
+          </select>
+        </div>
         <div>
           <div style="font-size:11px;color:var(--muted);margin-bottom:5px;">Resolution</div>
           <select id="vcam-res" style="width:100%;">
@@ -791,6 +797,7 @@ const $ = id => document.getElementById(id);
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
 let gpuUrl   = '';        // e.g. "http://123.45.67.89:8080"
+let localWs  = null;      // secondary WS to local.py for virtual cam
 let ws       = null;      // WebSocket to GPU
 let isLive   = false;
 let hasFace  = false;
@@ -1063,10 +1070,8 @@ async function startLive() {
 
   try {
     // Open WebSocket to GPU
-    // Route through local proxy so face-swapped frames can reach the virtual camera
-    const gpuWsUrl = gpuUrl.replace(/^http/, 'ws') + '/ws';
-    const wsUrl = `ws://${location.hostname}:${location.port || 8080}/proxy?url=${encodeURIComponent(gpuWsUrl)}`;
-    uiLog.push('Starting live stream via local proxy → ' + gpuWsUrl, 'info');
+    const wsUrl = gpuUrl.replace(/^http/, 'ws') + '/ws';
+    uiLog.push('Starting live stream to ' + wsUrl, 'info');
     ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
 
@@ -1095,6 +1100,9 @@ async function startLive() {
       ws.onclose = () => { clearTimeout(timeout); reject(new Error('WebSocket closed')); };
     });
 
+    // Open secondary WebSocket to local.py for virtual camera feed
+    _openLocalFeed();
+
     // Connected and models ready — start streaming
     isLive = true;
     dbg.show();
@@ -1118,6 +1126,10 @@ async function startLive() {
           outputCanvas.height = bmp.height;
           outputCtx.drawImage(bmp, 0, 0);
           bmp.close();
+          // Forward raw JPEG to local virtual camera feed (silent fail if local.py absent)
+          if (localWs && localWs.readyState === WebSocket.OPEN) {
+            try { localWs.send(event.data); } catch(_) {}
+          }
         }).catch((err) => { uiLog.push('Frame decode failed in browser: ' + err, 'warn'); });
       } else if (typeof event.data === 'string') {
         const msg = JSON.parse(event.data);
@@ -1148,6 +1160,7 @@ async function startLive() {
 
   } catch(e) {
     if (ws) { try { ws.close(); } catch(_){} ws = null; }
+    if (localWs) { try { localWs.close(); } catch(_){} localWs = null; }
     uiLog.push('Failed to go live: ' + e.message, 'error');
     alert('Failed to go live: ' + e.message);
     isLive = false;
@@ -1167,6 +1180,7 @@ async function stopLive() {
   if (ws) {
     try { ws.close(); } catch(_) {}
     ws = null;
+    if (localWs) { try { localWs.close(); } catch(_){} localWs = null; }
   }
 
   // Switch back to local preview
@@ -1353,42 +1367,72 @@ async function loadSettings() {
 }
 
 // ═══════════════════ VIRTUAL CAMERA ════════════════════════════════
+function _openLocalFeed() {
+  const localFeedUrl = `ws://${location.hostname}:${location.port || 8080}/vcam-feed`;
+  try {
+    if (localWs && localWs.readyState <= WebSocket.OPEN) localWs.close();
+    localWs = new WebSocket(localFeedUrl);
+    localWs.binaryType = 'arraybuffer';
+    localWs.onopen  = () => uiLog.push('Virtual cam feed connected.', 'ok');
+    localWs.onerror = () => uiLog.push('Virtual cam feed unavailable (local.py not running?).', 'warn');
+    localWs.onclose = () => { localWs = null; };
+  } catch(_) {}
+}
+
 async function loadVcamSettings() {
   try {
+    // Load device list first
+    const d = await fetch('/api/vcam/devices').then(r => r.json());
+    const sel = $('vcam-device');
+    while (sel.options.length > 1) sel.remove(1);
+    for (const dev of d.devices) {
+      const opt = document.createElement('option');
+      opt.value = dev.name;
+      opt.textContent = dev.name;
+      sel.appendChild(opt);
+    }
+    if (!d.has_vcam) {
+      $('vcam-status-msg').textContent = 'pyvirtualcam not installed — install OBS Studio: https://obsproject.com';
+      $('vcam-status-msg').style.color = 'var(--red)';
+      return;
+    }
+    // Load current settings
     const s = await fetch('/api/vcam').then(r => r.json());
     $('vcam-enabled').checked = !!s.enabled;
     $('vcam-res').value = s.width + 'x' + s.height;
     $('vcam-fps').value = String(s.fps);
-    const msg = s.enabled
-      ? (s.width + 'x' + s.height + ' @ ' + s.fps + 'fps')
-      : 'Virtual camera disabled';
-    $('vcam-status-msg').textContent = msg;
+    if (s.device) sel.value = s.device;
+    const active = s.active_device || (s.enabled ? 'starting...' : '—');
+    $('vcam-active-name').textContent = active;
+    $('vcam-active-name').style.color = (s.enabled && s.active_device) ? 'var(--green)' : 'var(--muted)';
+    $('vcam-status-msg').textContent = s.enabled ? (s.width + 'x' + s.height + ' @ ' + s.fps + ' fps') : 'Disabled';
     $('vcam-status-msg').style.color = s.enabled ? 'var(--green)' : 'var(--muted)';
   } catch(e) {
-    $('vcam-status-msg').textContent = 'local.py not running as local server';
+    $('vcam-status-msg').textContent = 'local.py not running — virtual cam unavailable';
     $('vcam-status-msg').style.color = 'var(--muted)';
   }
 }
 
 async function pushVcamSettings() {
   const [w, h] = $('vcam-res').value.split('x').map(Number);
-  const fps    = parseInt($('vcam-fps').value);
+  const fps     = parseInt($('vcam-fps').value);
   const enabled = $('vcam-enabled').checked;
+  const device  = $('vcam-device').value;
   $('vcam-status-msg').textContent = 'Applying...';
   $('vcam-status-msg').style.color = 'var(--amber)';
   try {
     const r = await fetch('/api/vcam', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ width: w, height: h, fps, enabled }),
+      body: JSON.stringify({ width: w, height: h, fps, enabled, device }),
     }).then(r => r.json());
-    const msg = r.enabled
-      ? (r.width + 'x' + r.height + ' @ ' + r.fps + 'fps — restarting...')
-      : 'Virtual camera disabled';
-    $('vcam-status-msg').textContent = msg;
+    $('vcam-status-msg').textContent = r.enabled
+      ? (r.width + 'x' + r.height + ' @ ' + r.fps + ' fps')
+      : 'Disabled';
     $('vcam-status-msg').style.color = r.enabled ? 'var(--green)' : 'var(--muted)';
+    $('vcam-active-name').textContent = r.active_device || (r.enabled ? 'restarting...' : '—');
   } catch(e) {
-    $('vcam-status-msg').textContent = 'Failed to apply — is local.py running?';
+    $('vcam-status-msg').textContent = 'Failed — is local.py running?';
     $('vcam-status-msg').style.color = 'var(--red)';
   }
 }
@@ -1400,6 +1444,7 @@ $('vcam-acc-btn').addEventListener('click', () => {
 $('vcam-enabled').addEventListener('change', pushVcamSettings);
 $('vcam-res').addEventListener('change', pushVcamSettings);
 $('vcam-fps').addEventListener('change', pushVcamSettings);
+$('vcam-device').addEventListener('change', pushVcamSettings);
 
 // ═══════════════════ ACCORDION ═══════════════════════════════════════
 $('acc-btn').addEventListener('click', () => {
