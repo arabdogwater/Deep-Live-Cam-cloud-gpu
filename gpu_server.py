@@ -505,7 +505,7 @@ async def ws_live(ws: WebSocket):
                     _apply_settings(data.get("data", {}))
 
                 elif msg_type == "ping":
-                    await ws.send_text(json.dumps({"type": "pong"}))
+                    await ws.send_text(json.dumps({"type": "pong", "ts": data.get("ts")}))
 
     except WebSocketDisconnect:
         pass

@@ -282,6 +282,36 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; backgro
   padding: 3px 10px; cursor: pointer; transition: color .15s, border-color .15s;
 }
 #disconnect-btn:hover { color: var(--red); border-color: var(--red); }
+
+/* ───── Debug Panel ───── */
+#dbg {
+  position: fixed; bottom: 14px; right: 14px; z-index: 9999;
+  background: rgba(5,8,15,.88); border: 1px solid rgba(255,255,255,.1);
+  border-radius: 10px; padding: 10px 13px; min-width: 220px;
+  font-size: 11px; font-family: 'Inter', monospace; line-height: 1;
+  backdrop-filter: blur(8px); color: var(--sub);
+  transition: opacity .2s;
+  user-select: none;
+}
+#dbg.hidden { opacity: 0; pointer-events: none; }
+#dbg-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px; cursor: pointer;
+}
+#dbg-title { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+#dbg-toggle-btn { font-size: 9px; color: var(--muted); background: none; border: none; cursor: pointer; padding: 0 2px; }
+#dbg-rows { display: flex; flex-direction: column; gap: 5px; }
+#dbg-rows.collapsed { display: none; }
+.dbg-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.dbg-label { color: var(--muted); white-space: nowrap; }
+.dbg-val {
+  font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap;
+  color: var(--text);
+}
+.dbg-val.good  { color: var(--green); }
+.dbg-val.warn  { color: var(--amber); }
+.dbg-val.bad   { color: var(--red); }
+.dbg-sep { height: 1px; background: rgba(255,255,255,.07); margin: 2px 0; }
 </style>
 </head>
 <body>
@@ -471,6 +501,31 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; backgro
 </div><!-- .body -->
 </div><!-- #app -->
 
+<!-- ╔══════════════════ DEBUG PANEL ══════════════════╗ -->
+<div id="dbg" class="hidden">
+  <div id="dbg-header">
+    <span id="dbg-title">⚡ Debug Stats</span>
+    <button id="dbg-toggle-btn" title="Collapse">▲</button>
+  </div>
+  <div id="dbg-rows">
+    <div class="dbg-row"><span class="dbg-label">WS Ping RTT</span><span class="dbg-val" id="dv-ping">—</span></div>
+    <div class="dbg-row"><span class="dbg-label">Frame RTT</span><span class="dbg-val" id="dv-frtt">—</span></div>
+    <div class="dbg-sep"></div>
+    <div class="dbg-row"><span class="dbg-label">FPS sent</span><span class="dbg-val" id="dv-fps-s">—</span></div>
+    <div class="dbg-row"><span class="dbg-label">FPS received</span><span class="dbg-val" id="dv-fps-r">—</span></div>
+    <div class="dbg-sep"></div>
+    <div class="dbg-row"><span class="dbg-label">Encode time</span><span class="dbg-val" id="dv-enc">—</span></div>
+    <div class="dbg-row"><span class="dbg-label">Decode time</span><span class="dbg-val" id="dv-dec">—</span></div>
+    <div class="dbg-sep"></div>
+    <div class="dbg-row"><span class="dbg-label">WS buffer</span><span class="dbg-val" id="dv-buf">—</span></div>
+    <div class="dbg-row"><span class="dbg-label">WS state</span><span class="dbg-val" id="dv-ws">—</span></div>
+    <div class="dbg-sep"></div>
+    <div class="dbg-row"><span class="dbg-label">Video mode</span><span class="dbg-val" id="dv-mode">—</span></div>
+    <div class="dbg-row"><span class="dbg-label">Frames sent</span><span class="dbg-val" id="dv-nfs">—</span></div>
+    <div class="dbg-row"><span class="dbg-label">Frames recv</span><span class="dbg-val" id="dv-nfr">—</span></div>
+  </div>
+</div>
+
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    Deep Live Cam — Frontend
@@ -478,7 +533,152 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; backgro
    to the cloud GPU, receives processed frames back.
    ═══════════════════════════════════════════════════════════════════ */
 
-const $ = id => document.getElementById(id);
+// ═══════════════════ DEBUG PANEL ════════════════════════════════════
+const dbg = {
+  // Counters / timing (reset each second)
+  _fsSince: 0, _frSince: 0, _lastTick: 0,
+  // Running state
+  pingRtt: null, frameRtt: null,
+  fpsS: 0, fpsR: 0,
+  encMs: null, decMs: null,
+  wsBuf: 0, wsState: 'CLOSED',
+  mode: '—',
+  totalSent: 0, totalRecv: 0,
+  // Internals
+  _pingTimer: null, _tickTimer: null,
+  _lastFrameSentAt: null, _pingTs: null,
+  _expanded: true,
+
+  _dv(id) { return document.getElementById(id); },
+
+  _color(val, warn, bad) {
+    if (val === null || val === undefined) return '';
+    if (val >= bad)  return 'bad';
+    if (val >= warn) return 'warn';
+    return 'good';
+  },
+
+  _set(id, text, cls) {
+    const el = this._dv(id);
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'dbg-val' + (cls ? ' ' + cls : '');
+  },
+
+  show() {
+    document.getElementById('dbg').classList.remove('hidden');
+    this._startTick();
+    this._startPing();
+  },
+
+  hide() {
+    document.getElementById('dbg').classList.add('hidden');
+    this._stopPing();
+    this._stopTick();
+  },
+
+  // Called every time we send a frame
+  onFrameSent() {
+    this._fsSince++;
+    this.totalSent++;
+    this._lastFrameSentAt = performance.now();
+  },
+
+  // Called every time we receive a processed frame
+  onFrameReceived() {
+    this._frSince++;
+    this.totalRecv++;
+    if (this._lastFrameSentAt !== null) {
+      this.frameRtt = Math.round(performance.now() - this._lastFrameSentAt);
+    }
+  },
+
+  // Called with encode duration in ms
+  onEncode(ms) { this.encMs = Math.round(ms); },
+
+  // Called with decode duration in ms
+  onDecode(ms) { this.decMs = Math.round(ms); },
+
+  // Called on pong receipt
+  onPong(ts) {
+    if (ts && this._pingTs !== null) {
+      this.pingRtt = Math.round(performance.now() - this._pingTs);
+    }
+  },
+
+  setMode(m) { this.mode = m; },
+
+  _startPing() {
+    this._stopPing();
+    this._pingTimer = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        this._pingTs = performance.now();
+        ws.send(JSON.stringify({ type: 'ping', ts: this._pingTs }));
+      }
+    }, 1500);
+  },
+
+  _stopPing() {
+    if (this._pingTimer) { clearInterval(this._pingTimer); this._pingTimer = null; }
+    this.pingRtt = null; this._pingTs = null;
+  },
+
+  _startTick() {
+    this._stopTick();
+    this._lastTick = performance.now();
+    this._tickTimer = setInterval(() => this._tick(), 1000);
+  },
+
+  _stopTick() {
+    if (this._tickTimer) { clearInterval(this._tickTimer); this._tickTimer = null; }
+  },
+
+  _tick() {
+    const now = performance.now();
+    const dt = (now - this._lastTick) / 1000;
+    this._lastTick = now;
+    this.fpsS = Math.round(this._fsSince / dt);
+    this.fpsR = Math.round(this._frSince / dt);
+    this._fsSince = 0; this._frSince = 0;
+
+    // Read WS state
+    if (ws) {
+      this.wsBuf = ws.bufferedAmount;
+      this.wsState = ['CONNECTING','OPEN','CLOSING','CLOSED'][ws.readyState] || '?';
+    } else {
+      this.wsBuf = 0; this.wsState = 'CLOSED';
+    }
+    this._render();
+  },
+
+  _render() {
+    const ms = v => v === null ? '—' : v + ' ms';
+    const fps = v => v + ' fps';
+    const kb = v => v < 1024 ? v + ' B' : Math.round(v/1024) + ' KB';
+
+    this._set('dv-ping', ms(this.pingRtt),   this._color(this.pingRtt, 150, 300));
+    this._set('dv-frtt', ms(this.frameRtt),  this._color(this.frameRtt, 200, 500));
+    this._set('dv-fps-s', fps(this.fpsS),    this._color(30 - this.fpsS, 10, 20));
+    this._set('dv-fps-r', fps(this.fpsR),    this._color(30 - this.fpsR, 10, 20));
+    this._set('dv-enc',  ms(this.encMs),     this._color(this.encMs, 20, 50));
+    this._set('dv-dec',  ms(this.decMs),     this._color(this.decMs, 30, 80));
+    this._set('dv-buf',  kb(this.wsBuf),     this.wsBuf > 200000 ? 'bad' : this.wsBuf > 50000 ? 'warn' : 'good');
+    this._set('dv-ws',   this.wsState,       this.wsState === 'OPEN' ? 'good' : this.wsState === 'CONNECTING' ? 'warn' : 'bad');
+    this._set('dv-mode', this.mode, '');
+    this._set('dv-nfs',  this.totalSent, '');
+    this._set('dv-nfr',  this.totalRecv, '');
+  }
+};
+
+// Toggle collapse
+document.getElementById('dbg-header').addEventListener('click', () => {
+  const rows = document.getElementById('dbg-rows');
+  const btn  = document.getElementById('dbg-toggle-btn');
+  dbg._expanded = !dbg._expanded;
+  rows.classList.toggle('collapsed', !dbg._expanded);
+  btn.textContent = dbg._expanded ? '▲' : '▼';
+});
+
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 
 let gpuUrl   = '';        // e.g. "http://123.45.67.89:8080"
@@ -776,6 +976,7 @@ async function startLive() {
 
     // Connected and models ready — start streaming
     isLive = true;
+    dbg.show();
 
     // Switch preview: hide local video, show output canvas
     videoEl.style.display = 'none';
@@ -787,8 +988,11 @@ async function startLive() {
     // Set up incoming frame handler
     ws.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
+        const t0 = performance.now();
         const blob = new Blob([event.data], { type: 'image/jpeg' });
         createImageBitmap(blob).then(bmp => {
+          dbg.onDecode(performance.now() - t0);
+          dbg.onFrameReceived();
           outputCanvas.width = bmp.width;
           outputCanvas.height = bmp.height;
           outputCtx.drawImage(bmp, 0, 0);
@@ -796,7 +1000,7 @@ async function startLive() {
         });
       } else if (typeof event.data === 'string') {
         const msg = JSON.parse(event.data);
-        if (msg.type === 'pong') { /* latency check */ }
+        if (msg.type === 'pong') { dbg.onPong(msg.ts); }
       }
     };
 
@@ -825,6 +1029,7 @@ async function startLive() {
 async function stopLive() {
   isLive = false;
   stopFrameCapture();
+  dbg.hide();
 
   if (ws) {
     try { ws.close(); } catch(_) {}
@@ -887,6 +1092,8 @@ async function startFrameCapture() {
           msg[0] = chunk.type === 'key' ? 0x01 : 0x02;
           msg.set(payload, 1);
           ws.send(msg.buffer);
+          dbg.onFrameSent();
+          dbg.onEncode(performance.now() - _encodeStart);
         },
         error: (e) => console.warn('[WebCodecs encoder]', e),
       });
@@ -897,6 +1104,7 @@ async function startFrameCapture() {
       _frameReader = processor.readable.getReader();
 
       let fcount = 0;
+      let _encodeStart = 0;
       (async () => {
         while (isLive) {
           let result;
@@ -905,18 +1113,21 @@ async function startFrameCapture() {
           const vf = result.value;
           if (_encoder?.state === 'configured') {
             // Keyframe every 2 s so the server can always re-sync
+            _encodeStart = performance.now();
             _encoder.encode(vf, { keyFrame: fcount % (SEND_FPS * 2) === 0 });
           }
           vf.close();
           fcount++;
         }
       })();
+      dbg.setMode('H264');
       return; // ✔ WebCodecs path active
     }
   }
 
   // ── JPEG fallback (Safari / older browsers) ──────────────────────────────
   // Still 1280×720 @ 30fps — just no inter-frame compression
+  dbg.setMode('JPEG');
   _jpegTimer = setInterval(() => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (!videoEl.videoWidth) return;
@@ -931,6 +1142,7 @@ async function startFrameCapture() {
         msg[0] = 0x00; // JPEG type byte
         msg.set(new Uint8Array(buf), 1);
         ws.send(msg.buffer);
+        dbg.onFrameSent();
       });
     }, 'image/jpeg', 0.92);
   }, Math.round(1000 / SEND_FPS));
