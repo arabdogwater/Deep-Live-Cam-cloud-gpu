@@ -494,6 +494,7 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; backgro
         <label class="tog"><span class="label">Fix color</span><input type="checkbox" id="tog-color-fix"><span class="tog-track"></span></label>
         <label class="tog"><span class="label">Poisson blend</span><input type="checkbox" id="tog-poisson"><span class="tog-track"></span></label>
         <label class="tog"><span class="label">Show FPS overlay</span><input type="checkbox" id="tog-show-fps"><span class="tog-track"></span></label>
+        <label class="tog"><span class="label">Mouth mask</span><input type="checkbox" id="tog-mouth-mask"><span class="tog-track"></span></label>
         <div class="divider"></div>
         <div>
           <div style="font-size:11px;color:var(--muted);margin-bottom:5px;">Face Enhancer</div>
@@ -1320,6 +1321,7 @@ async function pushSettingsNow() {
     show_fps:          $('tog-show-fps').checked,
     opacity:           parseFloat($('sl-opacity').value) / 100,
     sharpness:         parseFloat($('sl-sharp').value)   / 10,
+    mouth_mask:        $('tog-mouth-mask').checked,
     mouth_mask_size:   parseFloat($('sl-mouth').value),
     face_enhancer:          enh === 'face_enhancer',
     face_enhancer_gpen512:  enh === 'face_enhancer_gpen512',
@@ -1335,7 +1337,7 @@ async function pushSettingsNow() {
 
 const pushSettings = debounce(pushSettingsNow, 300);
 
-for (const id of ['tog-mirror','tog-many-faces','tog-color-fix','tog-poisson','tog-show-fps'])
+for (const id of ['tog-mirror','tog-many-faces','tog-color-fix','tog-poisson','tog-show-fps','tog-mouth-mask'])
   $(id).addEventListener('change', pushSettings);
 $('sel-enhancer').addEventListener('change', pushSettings);
 
@@ -1344,6 +1346,8 @@ function updateSliders() {
   $('lbl-sharp').textContent   = (parseInt($('sl-sharp').value) / 10).toFixed(1);
   const mm = parseInt($('sl-mouth').value);
   $('lbl-mouth').textContent   = mm === 0 ? 'Off' : mm + '%';
+  // Sync toggle: auto-enable when slider > 0, auto-disable when 0
+  $('tog-mouth-mask').checked = mm > 0;
 }
 for (const id of ['sl-opacity','sl-sharp','sl-mouth'])
   $(id).addEventListener('input', () => { updateSliders(); pushSettings(); });
@@ -1358,7 +1362,8 @@ async function loadSettings() {
     $('tog-show-fps').checked   = !!s.show_fps;
     $('sl-opacity').value = Math.round(s.opacity * 100);
     $('sl-sharp').value   = Math.round(s.sharpness * 10);
-    $('sl-mouth').value   = s.mouth_mask_size || 0;
+    $('sl-mouth').value        = s.mouth_mask_size || 0;
+    $('tog-mouth-mask').checked = !!s.mouth_mask;
     updateSliders();
     if (s.face_enhancer)              $('sel-enhancer').value = 'face_enhancer';
     else if (s.face_enhancer_gpen512) $('sel-enhancer').value = 'face_enhancer_gpen512';

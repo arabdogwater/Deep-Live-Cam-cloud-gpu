@@ -279,7 +279,7 @@ def preview_output():
 _BOOL_SETTINGS  = {
     "keep_fps", "keep_audio", "keep_frames", "many_faces",
     "map_faces", "poisson_blend", "color_correction",
-    "live_mirror", "show_fps",
+    "live_mirror", "show_fps", "mouth_mask",
 }
 _FLOAT_SETTINGS = {"opacity", "sharpness", "mouth_mask_size"}
 _ENHANCERS      = {"face_enhancer", "face_enhancer_gpen256", "face_enhancer_gpen512"}
@@ -292,7 +292,9 @@ def _apply_settings(body: dict):
             setattr(G, k, float(v))
         elif k in _ENHANCERS:
             G.fp_ui[k] = bool(v)
-    G.mouth_mask = G.mouth_mask_size > 0
+    # Auto-enable mouth_mask from slider only if the toggle wasn't explicitly sent
+    if "mouth_mask" not in body:
+        G.mouth_mask = G.mouth_mask_size > 0
     # Rebuild frame_processors so enhancers actually get loaded
     procs = ["face_swapper"]
     for enh in _ENHANCERS:
