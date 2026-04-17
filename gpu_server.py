@@ -540,13 +540,17 @@ if __name__ == "__main__":
     if not pre_check():
         sys.exit(1)
 
-    # Bind the socket here so there is zero race between the port-free check in
-    # onstart.sh and uvicorn's own bind attempt.  Passing `fd=` tells uvicorn to
-    # adopt our already-bound socket rather than creating a new one.
+    # Pre-bind so uvicorn adopts an already-open socket (no bind race).
+    # If the requested port is occupied, fall back to port 0 and let the OS
+    # assign any free port — never crash over a port conflict.
     import socket as _socket
     _sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
     _sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
-    _sock.bind((args.host, args.port))
+    try:
+        _sock.bind((args.host, args.port))
+    except OSError:
+        _sock.bind((args.host, 0))          # let OS pick a free port
+        args.port = _sock.getsockname()[1]
     _sock.set_inheritable(True)
 
     print(f"\n[GPU] Server ready → http://0.0.0.0:{args.port}/\n")
