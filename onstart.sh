@@ -162,14 +162,13 @@ elapsed
 # ── 6. Kill any previous instance of THIS script's server ───────────────────
 step "Stopping any previous gpu_server.py instance"
 pkill -f "gpu_server.py" 2>/dev/null || true
-# If OPEN_BUTTON_PORT was specified, we own that port — wait for it to free
-if [ -n "${OPEN_BUTTON_PORT:-}" ]; then
-    sleep 2
-fi
 # Refresh free port selection now that old process is gone
 if [ -z "${OPEN_BUTTON_PORT:-}" ]; then
     WEBUI_PORT=$(_find_free_port)
 fi
+# Kill anything still holding our port (e.g. lingering socket in TIME_WAIT)
+fuser -k "${WEBUI_PORT}/tcp" 2>/dev/null || true
+sleep 1
 ok "Will bind on port $WEBUI_PORT"
 elapsed
 
