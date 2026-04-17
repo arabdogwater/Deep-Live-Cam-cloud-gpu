@@ -192,4 +192,4 @@ echo "║    ${INSTANCE_IP}:${_webui_ext}"
 echo "╚═══════════════════════════════════════════════════╝"
 echo ""
 
-exec python gpu_server.py --execution-provider cuda
+exec python gpu_server.py --port "$WEBUI_PORT" --execution-provider cuda
