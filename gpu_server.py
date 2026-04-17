@@ -21,13 +21,43 @@ from typing import Optional
 import cv2
 import numpy as np
 
+# ── Live log fan-out to browser console ───────────────────────────────────────
+_LOG_LOCK = threading.Lock()
+_LOG_BUFFER = []
+_LOG_CLIENTS = set()
+
+
+def _srv_log(msg: str, level: str = "info"):
+    ts = time.strftime("%H:%M:%S")
+    line = f"[GPU {ts}] {msg}"
+    print(line, flush=True)
+
+    payload = json.dumps({"type": "log", "level": level, "ts": ts, "message": msg})
+    with _LOG_LOCK:
+        _LOG_BUFFER.append(payload)
+        if len(_LOG_BUFFER) > 200:
+            del _LOG_BUFFER[:-200]
+        clients = list(_LOG_CLIENTS)
+
+    dead = []
+    for loop, ws in clients:
+        try:
+            asyncio.run_coroutine_threadsafe(ws.send_text(payload), loop)
+        except Exception:
+            dead.append((loop, ws))
+
+    if dead:
+        with _LOG_LOCK:
+            for item in dead:
+                _LOG_CLIENTS.discard(item)
+
 # ── Optional: PyAV for H.264 decoding (WebCodecs input) ───────────────────────
 try:
     import av as _pyav
     _HAS_AV = True
 except ImportError:
     _HAS_AV = False
-    print("[GPU] PyAV not found — H.264 input disabled (pip install av)")
+    _srv_log("PyAV not found — H.264 input disabled (pip install av)", "warn")
 
 class _H264Decoder:
     """Decode raw H.264 annexb chunks produced by browser WebCodecs VideoEncoder."""
@@ -54,8 +84,10 @@ class _H264Decoder:
         except Exception as e:
             self._err_count += 1
             if self._err_count <= 5 or self._err_count % 100 == 0:
-                print(f"[GPU] H264 decode error #{self._err_count} "
-                      f"(ok={self._ok_count}): {e}")
+                _srv_log(
+                    f"H264 decode error #{self._err_count} (ok={self._ok_count}): {e}",
+                    "warn",
+                )
         return None
 
 # ── Stub tkinter-dependent modules BEFORE any project code imports them ────────
@@ -132,12 +164,23 @@ def _emit(msg: str, pct: float = -1.0):
     _st["status"] = msg
     if pct >= 0.0:
         _st["progress"] = pct
-    print(f"[GPU] {msg}")
+    _srv_log(msg)
 
 _core.update_status = lambda msg, scope="DLC.CORE": _emit(msg)
 
 # ── Model warmup ──────────────────────────────────────────────────────────────
 _models_ready = False
+
+
+def _first_face_or_none(frame):
+    if frame is None:
+        return None
+    face = get_one_face(frame)
+    if face is not None:
+        return face
+    faces = get_many_faces(frame) or []
+    return faces[0] if isinstance(faces, list) and faces else None
+
 
 def _prewarm_models():
     global _models_ready
@@ -148,7 +191,7 @@ def _prewarm_models():
     get_face_analyser()
     get_face_swapper()
     _models_ready = True
-    print("[GPU] Models prewarmed and ready")
+    _srv_log("Models prewarmed and ready")
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 app = FastAPI(title="Deep Live Cam GPU", docs_url=None, redoc_url=None)
@@ -180,6 +223,7 @@ async def upload_source(file: UploadFile = File(...)):
     dest = UPLOADS / f"source{ext}"
     dest.write_bytes(await file.read())
     G.source_path = str(dest)
+    _srv_log(f"Source uploaded: {dest.name}")
     return {"ok": True}
 
 @app.post("/api/upload/target")
@@ -193,6 +237,7 @@ async def upload_target(file: UploadFile = File(...)):
     G.target_path  = str(dest)
     G.output_path  = str(OUTPUTS / f"output{ext}")
     kind = "image" if is_image(str(dest)) else "video"
+    _srv_log(f"Target uploaded: {dest.name} ({kind})")
     return {"ok": True, "type": kind}
 
 # ── Preview endpoints ──────────────────────────────────────────────────────────
@@ -270,6 +315,7 @@ def get_settings():
 async def post_settings(req: Request):
     body = await req.json()
     _apply_settings(body)
+    _srv_log("Live settings updated")
     return {"ok": True}
 
 # ── Static processing (offline) ───────────────────────────────────────────────
@@ -349,7 +395,19 @@ def random_face():
 @app.websocket("/ws")
 async def ws_live(ws: WebSocket):
     await ws.accept()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
+
+    with _LOG_LOCK:
+        _LOG_CLIENTS.add((loop, ws))
+        backlog = list(_LOG_BUFFER)
+
+    for payload in backlog[-80:]:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            break
+
+    _srv_log("Live websocket connected")
 
     # Wait for models if still warming up
     if not _models_ready:
@@ -376,6 +434,8 @@ async def ws_live(ws: WebSocket):
         _proc_count = 0
         _decode_fail = 0
         _log_time  = time.time()
+        _last_src_state = None
+        _last_face_state = None
 
         while not stop.is_set():
             with latest_frame_lock:
@@ -411,7 +471,15 @@ async def ws_live(ws: WebSocket):
             if G.source_path and G.source_path != last_src:
                 last_src = G.source_path
                 img = cv2.imread(G.source_path)
-                src_img = get_one_face(img) if img is not None else None
+                src_img = _first_face_or_none(img)
+                src_state = src_img is not None
+                if src_state != _last_src_state:
+                    _srv_log(
+                        "Source face detected and ready for swapping" if src_state
+                        else "No face found in uploaded source image",
+                        "info" if src_state else "warn",
+                    )
+                    _last_src_state = src_state
 
             det_count += 1
             # Detect on first frame, then every 3rd frame thereafter.
@@ -419,10 +487,19 @@ async def ws_live(ws: WebSocket):
             if cached_face is None or det_count % 3 == 0:
                 result = (
                     get_many_faces(frame) if G.many_faces
-                    else get_one_face(frame)
+                    else _first_face_or_none(frame)
                 )
                 if result is not None:
                     cached_face = result
+
+                face_state = bool(result) if G.many_faces else (cached_face is not None)
+                if face_state != _last_face_state:
+                    _srv_log(
+                        "Live target face detected in camera feed" if face_state
+                        else "No target face detected in camera frame",
+                        "info" if face_state else "warn",
+                    )
+                    _last_face_state = face_state
 
             # Refresh processor modules periodically (picks up enhancer changes)
             if det_count % 30 == 0:
@@ -449,10 +526,11 @@ async def ws_live(ws: WebSocket):
             if now - _log_time >= 5.0:
                 dt = now - _log_time
                 fps = _proc_count / dt
-                print(f"[GPU] Live: {fps:.1f} fps out | "
-                      f"decode_fail={_decode_fail} | "
-                      f"src={'yes' if src_img is not None else 'NO'} | "
-                      f"face={'yes' if cached_face is not None else 'NO'}")
+                _srv_log(
+                    f"Live: {fps:.1f} fps out | decode_fail={_decode_fail} | "
+                    f"src={'yes' if src_img is not None else 'NO'} | "
+                    f"face={'yes' if cached_face is not None else 'NO'}"
+                )
                 _proc_count = 0
                 _decode_fail = 0
                 _log_time = now
@@ -523,10 +601,12 @@ async def ws_live(ws: WebSocket):
                     await ws.send_text(json.dumps({"type": "pong", "ts": data.get("ts")}))
 
     except WebSocketDisconnect:
-        pass
+        _srv_log("Live websocket disconnected", "warn")
     except Exception as e:
-        print(f"[GPU] WebSocket error: {e}")
+        _srv_log(f"WebSocket error: {e}", "warn")
     finally:
+        with _LOG_LOCK:
+            _LOG_CLIENTS.discard((loop, ws))
         stop.set()
         sender_task.cancel()
         try:
@@ -568,5 +648,5 @@ if __name__ == "__main__":
         args.port = _sock.getsockname()[1]
     _sock.set_inheritable(True)
 
-    print(f"\n[GPU] Server ready → http://0.0.0.0:{args.port}/\n")
+    _srv_log(f"Server ready → http://0.0.0.0:{args.port}/")
     uvicorn.run(app, fd=_sock.fileno(), log_level="warning")

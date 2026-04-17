@@ -179,7 +179,7 @@ aside {
 .slider-label { font-size: 12px; color: var(--sub); }
 .slider-val { font-size: 12px; color: var(--blue); font-variant-numeric: tabular-nums; }
 input[type=range] {
-  -webkit-appearance: none; width: 100%; height: 3px;
+  appearance: none; -webkit-appearance: none; width: 100%; height: 3px;
   background: var(--border2); border-radius: 2px; outline: none; cursor: pointer;
 }
 input[type=range]::-webkit-slider-thumb {
@@ -312,6 +312,34 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; backgro
 .dbg-val.warn  { color: var(--amber); }
 .dbg-val.bad   { color: var(--red); }
 .dbg-sep { height: 1px; background: rgba(255,255,255,.07); margin: 2px 0; }
+
+/* ───── Server Console ───── */
+#srv-console {
+  position: fixed; left: 14px; bottom: 14px; z-index: 9998;
+  width: 420px; max-width: calc(100vw - 28px);
+  background: rgba(5,8,15,.9); border: 1px solid rgba(255,255,255,.1);
+  border-radius: 10px; backdrop-filter: blur(8px);
+  color: var(--text); font-family: 'Inter', monospace;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35);
+}
+#srv-console-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px; cursor: pointer; user-select: none;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+}
+#srv-console-title { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+#srv-console-toggle { font-size: 9px; color: var(--muted); background: none; border: none; cursor: pointer; padding: 0 2px; }
+#srv-console-body {
+  max-height: 180px; overflow: auto; padding: 8px 10px 10px;
+  display: flex; flex-direction: column; gap: 4px; font-size: 11px;
+}
+#srv-console-body.collapsed { display: none; }
+.srv-line { color: var(--sub); line-height: 1.35; word-break: break-word; }
+.srv-line.info { color: var(--sub); }
+.srv-line.warn { color: var(--amber); }
+.srv-line.error { color: var(--red); }
+.srv-line.ok { color: var(--green); }
+.srv-ts { color: var(--muted); margin-right: 6px; }
 </style>
 </head>
 <body>
@@ -526,6 +554,14 @@ main { flex: 1; display: flex; flex-direction: column; overflow: hidden; backgro
   </div>
 </div>
 
+<div id="srv-console">
+  <div id="srv-console-header">
+    <span id="srv-console-title">Server Console</span>
+    <button id="srv-console-toggle" title="Collapse">▲</button>
+  </div>
+  <div id="srv-console-body"></div>
+</div>
+
 <script>
 /* ═══════════════════════════════════════════════════════════════════
    Deep Live Cam — Frontend
@@ -682,6 +718,33 @@ document.getElementById('dbg-header').addEventListener('click', () => {
   btn.textContent = dbg._expanded ? '▲' : '▼';
 });
 
+const uiLog = {
+  maxLines: 250,
+  push(message, level = 'info', ts = null) {
+    const body = document.getElementById('srv-console-body');
+    if (!body) return;
+    const line = document.createElement('div');
+    line.className = 'srv-line ' + level;
+    const when = ts || new Date().toLocaleTimeString();
+    line.innerHTML = '<span class="srv-ts">[' + when + ']</span>' + String(message)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    body.appendChild(line);
+    while (body.children.length > this.maxLines) body.removeChild(body.firstChild);
+    body.scrollTop = body.scrollHeight;
+  }
+};
+
+document.getElementById('srv-console-header').addEventListener('click', () => {
+  const body = document.getElementById('srv-console-body');
+  const btn = document.getElementById('srv-console-toggle');
+  body.classList.toggle('collapsed');
+  btn.textContent = body.classList.contains('collapsed') ? '▼' : '▲';
+});
+
+uiLog.push('UI ready. Waiting for GPU connection...', 'info');
+
 const $ = id => document.getElementById(id);
 
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
@@ -736,6 +799,7 @@ async function gpu(method, path, body) {
     btn.disabled = true;
     status.className = 'connect-status wait';
     status.textContent = 'Connecting...';
+    uiLog.push('Connecting to GPU at ' + url, 'info');
 
     try {
       const resp = await fetch(url + '/api/health', { signal: AbortSignal.timeout(8000) });
@@ -746,6 +810,7 @@ async function gpu(method, path, body) {
       if (remember.checked) localStorage.setItem('dlc_gpu_addr', raw);
 
       if (!data.models_ready) {
+        uiLog.push('GPU responded. Waiting for AI models to finish loading...', 'warn');
         status.className = 'connect-status wait';
         status.textContent = 'Connected! Waiting for AI models to load...';
         // Poll until models are ready — keep retrying on transient network errors
@@ -760,11 +825,13 @@ async function gpu(method, path, body) {
 
       status.className = 'connect-status ok';
       status.textContent = 'Connected!';
+      uiLog.push('GPU connection successful.', 'ok');
       await new Promise(r => setTimeout(r, 400));
       enterApp();
     } catch(e) {
       status.className = 'connect-status err';
       status.textContent = 'Failed to connect — check the address and that the GPU is running';
+      uiLog.push('GPU connection failed: ' + e.message, 'error');
       btn.disabled = false;
     }
   }
@@ -955,22 +1022,27 @@ async function startLive() {
   try {
     // Open WebSocket to GPU
     const wsUrl = gpuUrl.replace(/^http/, 'ws') + '/ws';
+    uiLog.push('Starting live stream to ' + wsUrl, 'info');
     ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
 
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('WebSocket timeout')), 10000);
 
-      ws.onopen = () => {};
+      ws.onopen = () => { uiLog.push('Live websocket opened.', 'ok'); };
 
       ws.onmessage = (event) => {
         if (typeof event.data === 'string') {
           const msg = JSON.parse(event.data);
           if (msg.type === 'ready') {
+            uiLog.push('GPU reported ready for live processing.', 'ok');
             clearTimeout(timeout);
             resolve();
           } else if (msg.type === 'status') {
             $('golive-label').textContent = msg.message || 'Loading...';
+            uiLog.push(msg.message || 'GPU status update', 'info');
+          } else if (msg.type === 'log') {
+            uiLog.push(msg.message, msg.level || 'info', msg.ts);
           }
         }
       };
@@ -1002,18 +1074,28 @@ async function startLive() {
           outputCanvas.height = bmp.height;
           outputCtx.drawImage(bmp, 0, 0);
           bmp.close();
-        }).catch(() => { /* corrupt JPEG from server */ });
+        }).catch((err) => { uiLog.push('Frame decode failed in browser: ' + err, 'warn'); });
       } else if (typeof event.data === 'string') {
         const msg = JSON.parse(event.data);
-        if (msg.type === 'pong') { dbg.onPong(msg.ts); }
+        if (msg.type === 'pong') {
+          dbg.onPong(msg.ts);
+        } else if (msg.type === 'log') {
+          uiLog.push(msg.message, msg.level || 'info', msg.ts);
+        } else if (msg.type === 'status') {
+          uiLog.push(msg.message || 'GPU status update', 'info');
+        } else if (msg.type === 'error') {
+          uiLog.push(msg.message || 'GPU error', 'error');
+        }
       }
     };
 
     ws.onclose = () => {
+      uiLog.push('Live websocket closed.', 'warn');
       if (isLive) stopLive();
     };
 
     ws.onerror = () => {
+      uiLog.push('Live websocket error.', 'error');
       if (isLive) stopLive();
     };
 
@@ -1022,6 +1104,7 @@ async function startLive() {
 
   } catch(e) {
     if (ws) { try { ws.close(); } catch(_){} ws = null; }
+    uiLog.push('Failed to go live: ' + e.message, 'error');
     alert('Failed to go live: ' + e.message);
     isLive = false;
     updateGoLiveBtn();
@@ -1035,6 +1118,7 @@ async function stopLive() {
   isLive = false;
   stopFrameCapture();
   dbg.hide();
+  uiLog.push('Live mode stopped.', 'warn');
 
   if (ws) {
     try { ws.close(); } catch(_) {}
