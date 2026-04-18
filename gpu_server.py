@@ -610,9 +610,9 @@ async def ws_live(ws: WebSocket):
                 continue
             out_notify.clear()
             with out_slot_lock:
-                if out_slot:
+                try:
                     data = out_slot.popleft()
-                else:
+                except IndexError:
                     continue
             try:
                 await ws.send_bytes(data)
