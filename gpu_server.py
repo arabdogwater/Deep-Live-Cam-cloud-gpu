@@ -15,16 +15,34 @@ import queue
 import time
 import json
 import asyncio
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 
+# ── Optional: libjpeg-turbo for fast server-side JPEG encoding ────────────────
+try:
+    from turbojpeg import TurboJPEG as _TurboJPEG
+    _tj = _TurboJPEG()
+    _HAS_TJ = True
+except Exception:
+    _HAS_TJ = False
+
 # ── Live log fan-out to browser console ───────────────────────────────────────
 _LOG_LOCK = threading.Lock()
 _LOG_BUFFER = []
-_LOG_CLIENTS = set()
+# Maps client id → (event_loop, asyncio.Queue) so the producer only needs to
+# call `call_soon_threadsafe` once per client instead of scheduling a full
+# coroutine for every log line.
+_LOG_QUEUES: dict = {}
+
+
+def _enqueue_log(q: asyncio.Queue, payload: str) -> None:
+    """Scheduled on the client's event loop; silently drops if queue is full."""
+    if not q.full():
+        q.put_nowait(payload)
 
 
 def _srv_log(msg: str, level: str = "info"):
@@ -37,19 +55,13 @@ def _srv_log(msg: str, level: str = "info"):
         _LOG_BUFFER.append(payload)
         if len(_LOG_BUFFER) > 200:
             del _LOG_BUFFER[:-200]
-        clients = list(_LOG_CLIENTS)
+        clients = list(_LOG_QUEUES.values())
 
-    dead = []
-    for loop, ws in clients:
+    for loop, q in clients:
         try:
-            asyncio.run_coroutine_threadsafe(ws.send_text(payload), loop)
+            loop.call_soon_threadsafe(_enqueue_log, q, payload)
         except Exception:
-            dead.append((loop, ws))
-
-    if dead:
-        with _LOG_LOCK:
-            for item in dead:
-                _LOG_CLIENTS.discard(item)
+            pass
 
 # ── Optional: PyAV for H.264 decoding (WebCodecs input) ───────────────────────
 try:
@@ -398,9 +410,14 @@ def random_face():
 async def ws_live(ws: WebSocket):
     await ws.accept()
     loop = asyncio.get_running_loop()
+    client_id = id(ws)
+
+    # Per-client log queue: producer puts payloads in; a dedicated coroutine
+    # drains it so _srv_log never blocks on a slow or stalled browser connection.
+    log_q: asyncio.Queue = asyncio.Queue(maxsize=200)
 
     with _LOG_LOCK:
-        _LOG_CLIENTS.add((loop, ws))
+        _LOG_QUEUES[client_id] = (loop, log_q)
         backlog = list(_LOG_BUFFER)
 
     for payload in backlog[-80:]:
@@ -421,11 +438,16 @@ async def ws_live(ws: WebSocket):
 
     # Shared state between receive loop and processing thread
     latest_frame_lock = threading.Lock()
-    latest_frame = [None]           # (mode, raw_bytes): mode='jpeg'|'h264'
-    # asyncio.Queue used as a lock-free bridge from the process thread to the
-    # async sender — avoids run_in_executor thread-pool exhaustion under rapid
-    # reconnects.
-    out_q: asyncio.Queue = asyncio.Queue(maxsize=4)
+    latest_frame = [None]           # (mode, raw_bytes, is_keyframe)
+
+    # Single-slot output buffer: the processing thread always writes the latest
+    # processed frame here; the async sender drains it.  Using deque(maxlen=1)
+    # with a lock and an asyncio.Event avoids the race condition that plagued
+    # the old asyncio.Queue approach (where get_nowait ran in the wrong thread).
+    out_slot: deque = deque(maxlen=1)
+    out_slot_lock = threading.Lock()
+    out_notify = asyncio.Event()
+
     stop = threading.Event()
 
     # ── Processing thread ──────────────────────────────────────────────────────
@@ -543,33 +565,57 @@ async def ws_live(ws: WebSocket):
                 _decode_fail = 0
                 _log_time = now
 
-            ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            if ok:
-                data = jpg.tobytes()
-                # Thread-safe put into the asyncio queue; drop oldest frame if full
+            # Encode output frame — libjpeg-turbo when available, else OpenCV
+            if _HAS_TJ:
                 try:
-                    loop.call_soon_threadsafe(out_q.put_nowait, data)
-                except asyncio.QueueFull:
-                    try:
-                        out_q.get_nowait()
-                    except asyncio.QueueEmpty:
-                        pass
-                    try:
-                        loop.call_soon_threadsafe(out_q.put_nowait, data)
-                    except asyncio.QueueFull:
-                        pass
+                    data = _tj.encode(frame, quality=85)
+                except Exception:
+                    continue
+            else:
+                ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if not ok:
+                    continue
+                data = jpg.tobytes()
+
+            # Deposit the latest frame in the single-slot output buffer and
+            # wake the async sender.  deque(maxlen=1) automatically evicts any
+            # frame that the sender hasn't yet consumed, so we never accumulate
+            # a backlog of stale frames.
+            with out_slot_lock:
+                out_slot.append(data)
+            loop.call_soon_threadsafe(out_notify.set)
 
     proc_t = threading.Thread(target=_process_loop, daemon=True)
     proc_t.start()
 
-    # ── Sender task: push processed frames back to the browser ─────────────────
+    # ── Log sender: drains the per-client log queue ────────────────────────────
+    async def _log_sender():
+        while not stop.is_set():
+            try:
+                payload = await asyncio.wait_for(log_q.get(), timeout=0.1)
+                await ws.send_text(payload)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                break
+
+    log_sender_task = asyncio.create_task(_log_sender())
+
+    # ── Frame sender: reads from the single-slot output buffer ─────────────────
     async def _sender():
         while not stop.is_set():
             try:
-                data = await asyncio.wait_for(out_q.get(), timeout=0.1)
-                await ws.send_bytes(data)
+                await asyncio.wait_for(out_notify.wait(), timeout=0.1)
             except asyncio.TimeoutError:
                 continue
+            out_notify.clear()
+            with out_slot_lock:
+                if out_slot:
+                    data = out_slot.popleft()
+                else:
+                    continue
+            try:
+                await ws.send_bytes(data)
             except Exception:
                 break
 
@@ -613,9 +659,14 @@ async def ws_live(ws: WebSocket):
         _srv_log(f"WebSocket error: {e}", "warn")
     finally:
         with _LOG_LOCK:
-            _LOG_CLIENTS.discard((loop, ws))
+            _LOG_QUEUES.pop(client_id, None)
         stop.set()
+        log_sender_task.cancel()
         sender_task.cancel()
+        try:
+            await log_sender_task
+        except asyncio.CancelledError:
+            pass
         try:
             await sender_task
         except asyncio.CancelledError:
