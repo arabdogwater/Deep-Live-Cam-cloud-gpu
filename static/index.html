@@ -1118,20 +1118,7 @@ async function startLive() {
     // Set up incoming frame handler
     ws.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
-        const t0 = performance.now();
-        const blob = new Blob([event.data], { type: 'image/jpeg' });
-        createImageBitmap(blob).then(bmp => {
-          dbg.onDecode(performance.now() - t0);
-          dbg.onFrameReceived();
-          outputCanvas.width = bmp.width;
-          outputCanvas.height = bmp.height;
-          outputCtx.drawImage(bmp, 0, 0);
-          bmp.close();
-          // Forward raw JPEG to local virtual camera feed (silent fail if local.py absent)
-          if (localWs && localWs.readyState === WebSocket.OPEN) {
-            try { localWs.send(event.data); } catch(_) {}
-          }
-        }).catch((err) => { uiLog.push('Frame decode failed in browser: ' + err, 'warn'); });
+        _renderFrame(event.data, performance.now());
       } else if (typeof event.data === 'string') {
         const msg = JSON.parse(event.data);
         if (msg.type === 'pong') {
@@ -1197,6 +1184,48 @@ async function stopLive() {
 const HAS_WEBCODECS = typeof VideoEncoder !== 'undefined' &&
                       typeof MediaStreamTrackProcessor !== 'undefined';
 
+// ImageDecoder API (Chrome 94+, Edge 94+) decodes JPEG frames off the main
+// thread, reducing GC pressure vs. the Blob→createImageBitmap path.
+const HAS_IMAGE_DECODER = typeof ImageDecoder !== 'undefined';
+
+/**
+ * Decode one JPEG ArrayBuffer and paint it onto outputCanvas.
+ * Forwards the raw bytes to the virtual cam feed if connected.
+ * Falls back to createImageBitmap when ImageDecoder is unavailable or fails.
+ */
+function _renderFrame(ab, t0) {
+  dbg.onFrameReceived();
+  if (localWs && localWs.readyState === WebSocket.OPEN) {
+    try { localWs.send(ab); } catch(_) {}
+  }
+  if (HAS_IMAGE_DECODER) {
+    const dec = new ImageDecoder({ data: ab, type: 'image/jpeg' });
+    dec.decode({ frameIndex: 0 }).then(({ image }) => {
+      dbg.onDecode(performance.now() - t0);
+      outputCanvas.width  = image.displayWidth;
+      outputCanvas.height = image.displayHeight;
+      outputCtx.drawImage(image, 0, 0);
+      image.close();
+      dec.close();
+    }).catch(() => {
+      dec.close();
+      _fallbackRenderFrame(ab, t0);
+    });
+  } else {
+    _fallbackRenderFrame(ab, t0);
+  }
+}
+
+function _fallbackRenderFrame(ab, t0) {
+  createImageBitmap(new Blob([ab], { type: 'image/jpeg' })).then(bmp => {
+    dbg.onDecode(performance.now() - t0);
+    outputCanvas.width  = bmp.width;
+    outputCanvas.height = bmp.height;
+    outputCtx.drawImage(bmp, 0, 0);
+    bmp.close();
+  }).catch((err) => { uiLog.push('Frame decode failed in browser: ' + err, 'warn'); });
+}
+
 const SEND_W   = 1280;
 const SEND_H   = 720;
 const SEND_FPS = 30;
@@ -1217,6 +1246,7 @@ async function startFrameCapture() {
       width:                  SEND_W,
       height:                 SEND_H,
       bitrate:                3_500_000,    // 3.5 Mbps — crisp at 720p
+      bitrateMode:           'constant',    // CBR: predictable bandwidth, lower latency
       framerate:              SEND_FPS,
       hardwareAcceleration:  'prefer-hardware',
       avc:                   { format: 'annexb' }, // raw NAL units, PyAV-compatible
@@ -1270,7 +1300,7 @@ async function startFrameCapture() {
           if (_encoder?.state === 'configured') {
             _encodeStart = now;
             _lastEncodeTime = now;
-            _encoder.encode(vf, { keyFrame: fcount % (SEND_FPS * 2) === 0 });
+            _encoder.encode(vf, { keyFrame: fcount % SEND_FPS === 0 });
             fcount++;
           }
           vf.close();
@@ -1282,15 +1312,31 @@ async function startFrameCapture() {
   }
 
   // ── JPEG fallback (Safari / older browsers) ──────────────────────────────
-  // Still 1280×720 @ 30fps — just no inter-frame compression
+  // Uses requestAnimationFrame with an in-flight guard and a bufferedAmount
+  // back-pressure check so frames never accumulate when the browser is slow.
   dbg.setMode('JPEG');
-  _jpegTimer = setInterval(() => {
+  let _jpegInFlight = false;
+  let _jpegLastSend = 0;
+  const _minJpegInterval = 1000 / SEND_FPS;
+  const _jpegMaxBuf = 128 * 1024; // 128 KB — drop frame if WS is backed up
+
+  function _jpegLoop() {
+    if (!isLive) return;
+    _jpegTimer = requestAnimationFrame(_jpegLoop);
+    if (_jpegInFlight) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (ws.bufferedAmount > _jpegMaxBuf) return;
     if (!videoEl.videoWidth) return;
+    const now = performance.now();
+    if (now - _jpegLastSend < _minJpegInterval) return;
+    _jpegLastSend = now;
     _sendCanvas.width  = SEND_W;
     _sendCanvas.height = SEND_H;
     _sendCtx.drawImage(videoEl, 0, 0, SEND_W, SEND_H);
+    _jpegInFlight = true;
+    const t0 = performance.now();
     _sendCanvas.toBlob(blob => {
+      _jpegInFlight = false;
       if (!blob || !ws || ws.readyState !== WebSocket.OPEN) return;
       blob.arrayBuffer().then(buf => {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -1299,13 +1345,15 @@ async function startFrameCapture() {
         msg.set(new Uint8Array(buf), 1);
         ws.send(msg.buffer);
         dbg.onFrameSent();
+        dbg.onEncode(performance.now() - t0);
       });
-    }, 'image/jpeg', 0.92);
-  }, Math.round(1000 / SEND_FPS));
+    }, 'image/jpeg', 0.80); // 0.80 quality: ~25% smaller than 0.92, visually fine
+  }
+  _jpegTimer = requestAnimationFrame(_jpegLoop);
 }
 
 function stopFrameCapture() {
-  if (_jpegTimer)   { clearInterval(_jpegTimer);          _jpegTimer   = null; }
+  if (_jpegTimer)   { cancelAnimationFrame(_jpegTimer);   _jpegTimer   = null; }
   if (_frameReader) { try { _frameReader.cancel(); } catch(e) {} _frameReader = null; }
   if (_encoder)     { try { _encoder.close();      } catch(e) {} _encoder     = null; }
 }
